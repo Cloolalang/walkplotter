@@ -4,6 +4,17 @@ import { buildPoiOnlyCsv, TrailModel } from './trail'
 import type { ImageMeta } from './trail'
 import type { PoiMarker, TrailPoint } from './types'
 
+/** Resolved from CSS variables on the overlay canvas (trail, pins, POI, crosshairs). */
+interface OverlayColors {
+  trailLine: string
+  pinUser: string
+  pinInterp: string
+  poi: string
+  poiLabelBg: string
+  crosshair: string
+  crosshairRing: string
+}
+
 const trail = new TrailModel()
 
 let imageMeta: ImageMeta | null = null
@@ -114,7 +125,8 @@ function safeJpgFilename(input: string, fallbackStem: string): string {
 function drawTrailOverlayImageSpace(
   ctx: CanvasRenderingContext2D,
   iw: number,
-  pinScale: number
+  pinScale: number,
+  colors: OverlayColors
 ): void {
   const pts = trail.points
   const ps = pinScale
@@ -123,7 +135,7 @@ function drawTrailOverlayImageSpace(
   const lineW = Math.max(2, iw / 500) * ps
 
   if (pts.length >= 2) {
-    ctx.strokeStyle = '#2ee6a6'
+    ctx.strokeStyle = colors.trailLine
     ctx.lineWidth = lineW
     ctx.lineJoin = 'round'
     ctx.lineCap = 'round'
@@ -141,7 +153,7 @@ function drawTrailOverlayImageSpace(
 
   for (const p of pts) {
     if (p.source === 'user') {
-      ctx.fillStyle = '#2ee6a6'
+      ctx.fillStyle = colors.pinUser
       ctx.beginPath()
       ctx.arc(p.x, p.y, dotR, 0, Math.PI * 2)
       ctx.fill()
@@ -149,7 +161,7 @@ function drawTrailOverlayImageSpace(
       ctx.lineWidth = 1
       ctx.stroke()
     } else {
-      ctx.strokeStyle = '#8af5d4'
+      ctx.strokeStyle = colors.pinInterp
       ctx.lineWidth = Math.max(1, lineW * 0.75)
       ctx.beginPath()
       ctx.arc(p.x, p.y, interpR, 0, Math.PI * 2)
@@ -161,7 +173,8 @@ function drawTrailOverlayImageSpace(
 function drawPoiOverlayImageSpace(
   ctx: CanvasRenderingContext2D,
   iw: number,
-  pinScale: number
+  pinScale: number,
+  colors: OverlayColors
 ): void {
   const ps = pinScale
   const r = Math.max(6, iw / 140) * ps
@@ -170,7 +183,7 @@ function drawPoiOverlayImageSpace(
   ctx.textBaseline = 'bottom'
 
   for (const m of poiMarkers) {
-    ctx.fillStyle = '#e53935'
+    ctx.fillStyle = colors.poi
     ctx.beginPath()
     ctx.arc(m.x, m.y, r, 0, Math.PI * 2)
     ctx.fill()
@@ -183,7 +196,7 @@ function drawPoiOverlayImageSpace(
     const tw = ctx.measureText(text).width
     const bx = m.x + r + 3
     const by = m.y - fontSize - pad * 2
-    ctx.fillStyle = 'rgba(0,0,0,0.72)'
+    ctx.fillStyle = colors.poiLabelBg
     ctx.fillRect(bx, by, tw + pad * 2, fontSize + pad * 2)
     ctx.fillStyle = '#fff'
     ctx.textAlign = 'left'
@@ -203,8 +216,9 @@ function exportMapSnapshotJpeg(filename: string): void {
   if (!ctx) return
 
   ctx.drawImage(img, 0, 0, iw, ih)
-  drawTrailOverlayImageSpace(ctx, iw, pinDotScale)
-  drawPoiOverlayImageSpace(ctx, iw, pinDotScale)
+  const snapColors = getOverlayColors()
+  drawTrailOverlayImageSpace(ctx, iw, pinDotScale, snapColors)
+  drawPoiOverlayImageSpace(ctx, iw, pinDotScale, snapColors)
 
   c.toBlob(
     (blob) => {
@@ -294,6 +308,7 @@ function redraw(): void {
   const h = canvas.height / (window.devicePixelRatio || 1)
   ctx.clearRect(0, 0, w, h)
   const ps = pinDotScale
+  const colors = getOverlayColors()
 
   const locals: { x: number; y: number; p: TrailPoint }[] = []
   for (const p of trail.points) {
@@ -304,9 +319,8 @@ function redraw(): void {
   const lastUser = crosshairsEnabled ? getLastUserPin() : null
   const lastUserLocal = lastUser ? toLocalPoint(lastUser) : null
   if (lastUserLocal && img.naturalWidth) {
-    const cx = getComputedStyle(canvas).getPropertyValue('--crosshair').trim() || 'rgba(46, 230, 166, 0.65)'
     ctx.save()
-    ctx.strokeStyle = cx
+    ctx.strokeStyle = colors.crosshair
     ctx.lineWidth = Math.max(0.5, 1 * ps)
     ctx.setLineDash([7, 5])
     ctx.lineCap = 'butt'
@@ -320,7 +334,7 @@ function redraw(): void {
   }
 
   if (locals.length >= 2) {
-    ctx.strokeStyle = getComputedStyle(canvas).getPropertyValue('--trail-line').trim() || '#2ee6a6'
+    ctx.strokeStyle = colors.trailLine
     ctx.lineWidth = Math.max(1, 2 * ps)
     ctx.lineJoin = 'round'
     ctx.lineCap = 'round'
@@ -336,17 +350,14 @@ function redraw(): void {
     ctx.stroke()
   }
 
-  const userFill =
-    getComputedStyle(canvas).getPropertyValue('--pin-user').trim() || '#2ee6a6'
-  const interpStroke =
-    getComputedStyle(canvas).getPropertyValue('--pin-interp').trim() || '#8af5d4'
+  const userFill = colors.pinUser
+  const interpStroke = colors.pinInterp
 
   for (const { x, y, p } of locals) {
     if (p.source === 'user') {
       const isLastUser = lastUser !== null && p === lastUser
       if (isLastUser && crosshairsEnabled) {
-        const ring = getComputedStyle(canvas).getPropertyValue('--crosshair-ring').trim() || 'rgba(46, 230, 166, 0.9)'
-        ctx.strokeStyle = ring
+        ctx.strokeStyle = colors.crosshairRing
         ctx.lineWidth = Math.max(1, 2 * ps)
         ctx.setLineDash([])
         ctx.beginPath()
@@ -370,9 +381,8 @@ function redraw(): void {
     }
   }
 
-  const repFill = getComputedStyle(canvas).getPropertyValue('--poi').trim() || '#e53935'
-  const repLabelBg =
-    getComputedStyle(canvas).getPropertyValue('--poi-label-bg').trim() || 'rgba(0,0,0,0.72)'
+  const repFill = colors.poi
+  const repLabelBg = colors.poiLabelBg
   const fontPx = Math.max(9, Math.min(22, (w / 42) * ps))
 
   ctx.font = `600 ${fontPx}px system-ui,Segoe UI,sans-serif`
@@ -441,6 +451,15 @@ app.innerHTML = `
   </div>
 
   <div class="tab-panel tab-panel--controls" id="panel-controls" role="tabpanel" aria-labelledby="tab-controls" hidden>
+    <div class="controls-title-bar" role="banner">
+      <span class="controls-title-text">Walkplotter - version 1.2 March 2026</span>
+      <a
+        class="controls-title-link"
+        href="https://github.com/Cloolalang/walkplotter#readme"
+        target="_blank"
+        rel="noopener noreferrer"
+        >README on GitHub</a>
+    </div>
     <header class="toolbar">
       <label class="btn btn-primary">
         Choose floor plan
@@ -490,6 +509,24 @@ app.innerHTML = `
       <label class="pin-size-label" for="pin-size">Pin size</label>
       <input type="range" id="pin-size" min="25" max="250" step="5" value="100" disabled />
       <span class="pin-size-pct" id="pin-size-pct">100%</span>
+      <label class="pin-color-label" for="color-trail">Trail color</label>
+      <input
+        type="color"
+        id="color-trail"
+        class="pin-color-input"
+        value="#2ee6a6"
+        disabled
+        title="Polyline between trail pins"
+      />
+      <label class="pin-color-label" for="color-pin">Pin color</label>
+      <input
+        type="color"
+        id="color-pin"
+        class="pin-color-input"
+        value="#2ee6a6"
+        disabled
+        title="User pins, interpolated points, and crosshairs"
+      />
     </div>
   </div>
   <dialog class="save-dialog" id="save-dialog">
@@ -595,6 +632,83 @@ const poiLabelInput = document.querySelector<HTMLInputElement>('#poi-label')!
 const poiCancel = document.querySelector<HTMLButtonElement>('#poi-cancel')!
 const crosshairsToggle = document.querySelector<HTMLInputElement>('#crosshairs-toggle')!
 const interpStep = document.querySelector<HTMLInputElement>('#interp-step')!
+const colorTrail = document.querySelector<HTMLInputElement>('#color-trail')!
+const colorPin = document.querySelector<HTMLInputElement>('#color-pin')!
+
+const rootStyle = document.documentElement.style
+
+function mixHexWithWhite(hex: string, t: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
+  if (!m) return '#8af5d4'
+  const n = parseInt(m[1]!, 16)
+  const r = (n >> 16) & 255
+  const g = (n >> 8) & 255
+  const b = n & 255
+  const rr = Math.round(r + (255 - r) * t)
+  const gg = Math.round(g + (255 - g) * t)
+  const bb = Math.round(b + (255 - b) * t)
+  return `#${[rr, gg, bb].map((x) => x.toString(16).padStart(2, '0')).join('')}`
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
+  if (!m) return `rgba(46, 230, 166, ${alpha})`
+  const n = parseInt(m[1]!, 16)
+  const r = (n >> 16) & 255
+  const g = (n >> 8) & 255
+  const b = n & 255
+  return `rgba(${r},${g},${b},${alpha})`
+}
+
+function getOverlayColors(): OverlayColors {
+  const s = getComputedStyle(canvas)
+  return {
+    trailLine: s.getPropertyValue('--trail-line').trim() || '#2ee6a6',
+    pinUser: s.getPropertyValue('--pin-user').trim() || '#2ee6a6',
+    pinInterp: s.getPropertyValue('--pin-interp').trim() || '#8af5d4',
+    poi: s.getPropertyValue('--poi').trim() || '#e53935',
+    poiLabelBg: s.getPropertyValue('--poi-label-bg').trim() || 'rgba(0,0,0,0.72)',
+    crosshair: s.getPropertyValue('--crosshair').trim() || 'rgba(46, 230, 166, 0.65)',
+    crosshairRing: s.getPropertyValue('--crosshair-ring').trim() || 'rgba(46, 230, 166, 0.9)',
+  }
+}
+
+function applyTrailColorFromPicker(): void {
+  rootStyle.setProperty('--trail-line', colorTrail.value)
+}
+
+function applyPinColorFromPicker(): void {
+  const v = colorPin.value
+  rootStyle.setProperty('--pin-user', v)
+  rootStyle.setProperty('--pin-interp', mixHexWithWhite(v, 0.38))
+  rootStyle.setProperty('--crosshair', hexToRgba(v, 0.65))
+  rootStyle.setProperty('--crosshair-ring', hexToRgba(v, 0.9))
+}
+
+function syncColorPickersFromCss(): void {
+  const c = getOverlayColors()
+  colorTrail.value = rgbLikeToHexForInput(c.trailLine, '#2ee6a6')
+  colorPin.value = rgbLikeToHexForInput(c.pinUser, '#2ee6a6')
+}
+
+/** Normalize CSS color to #rrggbb for type=color (best effort). */
+function rgbLikeToHexForInput(css: string, fallback: string): string {
+  const s = css.trim()
+  if (/^#[0-9a-f]{6}$/i.test(s)) return s.toLowerCase()
+  const m = /^#([0-9a-f]{3})$/i.exec(s)
+  if (m) {
+    const x = m[1]!
+    return `#${x[0]}${x[0]}${x[1]}${x[1]}${x[2]}${x[2]}`.toLowerCase()
+  }
+  const rgb = s.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i)
+  if (rgb) {
+    const r = Number(rgb[1])
+    const g = Number(rgb[2])
+    const b = Number(rgb[3])
+    return `#${[r, g, b].map((x) => x.toString(16).padStart(2, '0')).join('')}`
+  }
+  return fallback
+}
 
 function applyViewTransform(): void {
   stageInner.style.setProperty('--map-pan-x', `${mapPanX}px`)
@@ -754,6 +868,8 @@ function updateChrome(): void {
   crosshairsToggle.disabled = !hasMap
   interpStep.disabled = !hasMap
   pinSizeRange.disabled = !hasMap
+  colorTrail.disabled = !hasMap
+  colorPin.disabled = !hasMap
 
   if (!hasMap) {
     hintMain.textContent =
@@ -900,6 +1016,7 @@ img.addEventListener('load', () => {
     }
   }
   recording = true
+  syncColorPickersFromCss()
   updateChrome()
   redraw()
 })
@@ -1084,6 +1201,16 @@ pinSizeRange.addEventListener('input', () => {
   redraw()
 })
 
+colorTrail.addEventListener('input', () => {
+  applyTrailColorFromPicker()
+  redraw()
+})
+
+colorPin.addEventListener('input', () => {
+  applyPinColorFromPicker()
+  redraw()
+})
+
 btnPause.addEventListener('click', () => {
   if (!img.naturalWidth || !recording) return
   recording = false
@@ -1214,5 +1341,6 @@ ro.observe(stageInner)
 
 syncInterpControl()
 syncPinSizeControl()
+syncColorPickersFromCss()
 updateChrome()
 void loadDefaultFloorPlan()

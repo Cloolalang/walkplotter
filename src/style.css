@@ -97,6 +97,45 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
+.controls-title-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px 14px;
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(
+    180deg,
+    rgba(46, 230, 166, 0.14),
+    rgba(26, 51, 44, 0.95)
+  );
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-align: center;
+}
+
+.controls-title-text {
+  text-align: center;
+}
+
+.controls-title-link {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.controls-title-link:hover {
+  text-decoration: underline;
+}
+
 .tab-panel--map .stage-wrap {
   flex: 1;
   min-height: 120px;
@@ -367,6 +406,28 @@ body {
   color: var(--accent);
   font-weight: 600;
   min-width: 3rem;
+}
+
+.pin-color-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pin-color-input {
+  width: 2.5rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.pin-color-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .stage.recording-off canvas {

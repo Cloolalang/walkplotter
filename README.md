@@ -76,6 +76,19 @@ Run the dev server (`npm run dev`) and open the URL shown in the terminal, or se
 
 ---
 
+## Dependencies (build) and tested browser
+
+The app itself has **no runtime npm dependencies**; the UI is bundled for static hosting. **Development / build** tools are listed in `package.json` and resolved in `package-lock.json`. Current locked versions:
+
+| Package | Version |
+|---------|---------|
+| [TypeScript](https://www.typescriptlang.org/) | 5.9.3 |
+| [Vite](https://vite.dev/) | 8.0.3 |
+
+**Tested on Android:** **Google Chrome** version **111.0.5563.116** (floor plan loading, trail/POI, pinch–zoom, pan, CSV/JPG export over local HTTP).
+
+---
+
 ## Setup on a computer
 
 ```bash
@@ -166,6 +179,12 @@ Some server apps ask for broad storage access so they can read any folder you se
 | `npm run dev`  | Dev server (default port 4173)   |
 | `npm run build`| Typecheck + production `dist/`   |
 | `npm run preview` | Serve `dist/` locally (test) |
+
+---
+
+## Development
+
+This project was developed using [Cursor](https://cursor.com/).
 
 ---
 
