@@ -29,6 +29,19 @@ export type MergedPlotPoint = {
   timeMs: number
 }
 
+/** Trail sample with no path-loss row within the merge time window (still drawn on the Process map). */
+export type UnmatchedTrailPoint = {
+  x: number
+  y: number
+  source: string
+  timeMs: number
+}
+
+export type MergeByNearestTimeResult = {
+  merged: MergedPlotPoint[]
+  unmatched: UnmatchedTrailPoint[]
+}
+
 const DATE_RE = /^#\s*test_date_local:\s*(\d{4}-\d{2}-\d{2})\s*$/i
 const POI_SECTION = /^#\s*section:\s*poi/i
 const SEMANTICS_RE = /^#\s*timestamp_semantics:\s*(.+)$/i
@@ -294,7 +307,7 @@ function rowTimeMs(
 
 /**
  * For each trail row, attach path loss from the nearest RF sample in time (same calendar day as `testDateYmd`).
- * Drops trail points with no RF sample within `maxDeltaMs`.
+ * Trail rows with no RF sample within `maxDeltaMs` appear in `unmatched` (for drawing) instead of being dropped.
  * When `timeOpts` indicates elapsed session timestamps, `sessionEpochMs` + duration (H:MM:SS) is used for both trail and RF rows.
  */
 export function mergeByNearestTime(
@@ -303,8 +316,8 @@ export function mergeByNearestTime(
   rf: PathLossRow[],
   maxDeltaMs: number,
   timeOpts?: MergeTimeOptions
-): MergedPlotPoint[] {
-  if (!trail.length || !rf.length) return []
+): MergeByNearestTimeResult {
+  if (!trail.length || !rf.length) return { merged: [], unmatched: [] }
 
   const rfMs = rf
     .map((r) => ({
@@ -312,9 +325,10 @@ export function mergeByNearestTime(
       pl: r.pathLoss,
     }))
     .filter((x) => Number.isFinite(x.t))
-  if (!rfMs.length) return []
+  if (!rfMs.length) return { merged: [], unmatched: [] }
 
   const out: MergedPlotPoint[] = []
+  const unmatched: UnmatchedTrailPoint[] = []
   for (const row of trail) {
     const t = rowTimeMs(testDateYmd, row.timestamp, timeOpts)
     if (!Number.isFinite(t)) continue
@@ -330,7 +344,9 @@ export function mergeByNearestTime(
     }
     if (bestD <= maxDeltaMs) {
       out.push({ x: row.x, y: row.y, pathLoss: best.pl, source: row.source, timeMs: t })
+    } else {
+      unmatched.push({ x: row.x, y: row.y, source: row.source, timeMs: t })
     }
   }
-  return out
+  return { merged: out, unmatched }
 }

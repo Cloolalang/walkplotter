@@ -775,6 +775,29 @@ body {
   flex-shrink: 0;
 }
 
+/* Transparent overlay input: direct tap; CSV/bundle omit `accept` so Android opens Files not Camera. */
+label.process-file-pick {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.process-file-input-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 16px;
+}
+
 .process-status {
   margin: 0;
 }
@@ -823,6 +846,18 @@ body {
   background: transparent;
 }
 
+.process-legend-unmatched {
+  display: inline-block;
+  vertical-align: -2px;
+  width: 11px;
+  height: 11px;
+  margin-left: 2px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-sizing: border-box;
+  background: #000;
+}
+
 .process-histogram-wrap {
   flex-shrink: 0;
   font-size: 13px;
@@ -840,7 +875,101 @@ body {
   color: var(--text);
 }
 
+.process-colour-scale {
+  margin: 0 0 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.process-colour-scale-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  user-select: none;
+}
+
+.process-colour-scale-hint {
+  margin: 8px 0 10px;
+  font-size: 12px;
+}
+
+.process-pl-stops-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+  max-width: 280px;
+}
+
+.process-pl-stop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.process-pl-stop-db {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  min-width: 3.25rem;
+}
+
+.process-pl-stop-color {
+  width: 42px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.process-colour-scale-actions {
+  margin-top: 4px;
+}
+
+.process-hist-col-swatch {
+  width: 2.5rem;
+  text-align: center !important;
+  vertical-align: middle;
+}
+
+.process-hist-swatch {
+  display: inline-block;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  box-sizing: border-box;
+  vertical-align: middle;
+}
+
+.process-histogram-layout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px 18px;
+}
+
+.process-histogram-pie-wrap {
+  flex: 0 0 auto;
+  width: min(200px, 42vw);
+  max-width: 100%;
+}
+
+.process-histogram-pie-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.18);
+}
+
 .process-histogram-scroll {
+  flex: 1 1 220px;
+  min-width: 0;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }

@@ -7,6 +7,13 @@ import {
   fsplPathLossNegativeConvention,
 } from './fspl'
 import {
+  base64ToBlob,
+  parseProcessBundleJson,
+  uint8ArrayToBase64,
+  PROCESS_BUNDLE_VERSION,
+  type ProcessBundleV1,
+} from './processBundle'
+import {
   DEFAULT_MAX_MATCH_MS,
   extractWalkplotterTestDate,
   extractWalkplotterTimestampInfo,
@@ -19,6 +26,7 @@ import type {
   EditableTrailRow,
   MergeTimeOptions,
   MergedPlotPoint,
+  UnmatchedTrailPoint,
   WalkplotterTrailRow,
 } from './processMerge'
 import { buildPoiOnlyCsv, formatDurationMsAsHMS, formatLocalTimeHMS, TrailModel } from './trail'
@@ -50,6 +58,12 @@ let processPlanObjectUrl: string | null = null
 let processMergedPoints: MergedPlotPoint[] = []
 /** Unscaled merge result; FSPL UI derives `processMergedPoints` from this. */
 let processMergedPointsRaw: MergedPlotPoint[] = []
+/** Trail samples with no path-loss row within the merge window (drawn as hollow rings when PL is plotted). */
+let processUnmatchedTrailPoints: UnmatchedTrailPoint[] = []
+/** Cached path-loss CSV text (set when a file is chosen or a bundle is loaded) for Plot / Save bundle. */
+let processPathLossCsvText = ''
+/** When set, file summary labels come from a loaded bundle until the user picks new files. */
+let processBundleSummaryOverride: { plan: string; walk: string; pl: string } | null = null
 /** Walkplotter trail loaded in Process tab; x/y edits are saved via Save Walkplotter CSV. */
 let processWalkPreamble = ''
 let processWalkTail = ''
@@ -544,7 +558,7 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--controls" id="panel-controls" role="tabpanel" aria-labelledby="tab-controls" hidden>
     <div class="controls-title-bar" role="banner">
-      <span class="controls-title-text">Walkplotter - version 2.0 March 2026</span>
+      <span class="controls-title-text">Walkplotter - version 2.5 March 2026</span>
       <a
         class="controls-title-link"
         href="https://github.com/Cloolalang/walkplotter#readme"
@@ -622,25 +636,32 @@ app.innerHTML = `
   <div class="tab-panel tab-panel--process" id="panel-process" role="tabpanel" aria-labelledby="tab-process" hidden>
     <p class="hint process-hint">
       Load the <strong>floor plan</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss in <strong>dB</strong>, 1st = HH:MM:SS) and <strong>Plot path loss</strong>. Nearest-time match within
-      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>.
+      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>. After plotting, use <strong>Save process bundle</strong> to name and download one JSON file with all three; <strong>Load bundle</strong> restores them with a single file pick (large plans make a large file).
     </p>
     <div class="process-toolbar">
-      <label class="btn btn-primary process-file-btn">
+      <label class="btn btn-primary process-file-btn process-file-pick">
         Floor plan
-        <input id="process-file-plan" type="file" accept="image/*" hidden />
+        <input id="process-file-plan" type="file" accept="image/*" class="process-file-input-overlay" />
       </label>
-      <label class="btn btn-primary process-file-btn">
+      <label class="btn btn-primary process-file-btn process-file-pick">
         Walkplotter CSV
-        <input id="process-file-walk" type="file" accept=".csv,text/csv,text/plain,*/*" hidden />
+        <input id="process-file-walk" type="file" class="process-file-input-overlay" />
       </label>
-      <label class="btn btn-primary process-file-btn">
+      <label class="btn btn-primary process-file-btn process-file-pick">
         Path loss CSV
-        <input id="process-file-pl" type="file" accept=".csv,text/csv,text/plain,*/*" hidden />
+        <input id="process-file-pl" type="file" class="process-file-input-overlay" />
       </label>
       <button type="button" class="btn btn-primary process-btn-run" id="process-btn-plot" title="Merge path loss log with current trail and draw">Plot path loss</button>
       <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss overlay to edit the trail again">
         Clear path loss plot
       </button>
+      <button type="button" class="btn" id="process-btn-save-bundle" disabled title="Download one JSON file with floor plan + Walkplotter CSV + path loss CSV">
+        Save process bundle
+      </button>
+      <label class="btn process-file-btn process-file-pick" title="Load a JSON bundle from Save process bundle">
+        Load bundle
+        <input id="process-file-bundle" type="file" class="process-file-input-overlay" />
+      </label>
       <label class="toolbar-toggle process-toolbar-toggle" title="Show path loss (dB) next to each point">
         <input type="checkbox" id="process-show-pl-labels" />
         Point labels
@@ -711,19 +732,42 @@ app.innerHTML = `
     <p class="hint process-status" id="process-status">Load floor plan and Walkplotter CSV to begin.</p>
     <div class="process-legend" id="process-legend" hidden></div>
     <div class="process-histogram-wrap" id="process-histogram-wrap" hidden>
-      <p class="process-histogram-title">Path loss histogram (20 dB bins)</p>
-      <div class="process-histogram-scroll">
-        <table class="process-histogram-table">
-          <thead>
-            <tr>
-              <th scope="col">Bin (dB)</th>
-              <th scope="col">Count</th>
-              <th scope="col">Seconds</th>
-              <th scope="col">%</th>
-            </tr>
-          </thead>
-          <tbody id="process-histogram-body"></tbody>
-        </table>
+      <p class="process-histogram-title">Path loss histogram (20 dB bins, down to −120 dB)</p>
+      <details class="process-colour-scale" id="process-colour-scale">
+        <summary class="process-colour-scale-summary">Bin &amp; map colour scale</summary>
+        <p class="hint process-colour-scale-hint">
+          Colours are interpolated between these path-loss stops (−120 dB weak → −30 dB strong). Adjust stops to change
+          <strong>histogram</strong>, <strong>pie</strong>, and <strong>map</strong> markers together. Values outside −30…−120 dB stay clamped to the ends.
+        </p>
+        <div class="process-pl-stops-editor" id="process-pl-stops-editor"></div>
+        <div class="process-colour-scale-actions">
+          <button type="button" class="btn" id="process-pl-stops-reset">Reset to default</button>
+        </div>
+      </details>
+      <div class="process-histogram-layout">
+        <div class="process-histogram-pie-wrap">
+          <svg
+            class="process-histogram-pie-svg"
+            id="process-histogram-pie"
+            viewBox="0 0 100 100"
+            role="img"
+            aria-label="Path loss share by bin (same colors as map)"
+          ></svg>
+        </div>
+        <div class="process-histogram-scroll">
+          <table class="process-histogram-table">
+            <thead>
+              <tr>
+                <th scope="col" class="process-hist-col-swatch" aria-label="Bin colour"></th>
+                <th scope="col">Range (dB)</th>
+                <th scope="col">Count</th>
+                <th scope="col">Seconds</th>
+                <th scope="col">%</th>
+              </tr>
+            </thead>
+            <tbody id="process-histogram-body"></tbody>
+          </table>
+        </div>
       </div>
     </div>
     <div class="map-zoom-bar process-zoom-bar" id="process-zoom-bar" hidden>
@@ -795,6 +839,30 @@ app.innerHTML = `
       </div>
     </form>
   </dialog>
+  <dialog class="save-dialog" id="bundle-save-dialog">
+    <form id="bundle-save-form">
+      <h2 class="save-dialog-title">Save process bundle</h2>
+      <p class="save-dialog-desc">
+        Choose a file name for the JSON bundle (floor plan + Walkplotter CSV + path loss CSV).
+        <code>.json</code> is added if missing.
+      </p>
+      <label class="save-dialog-label">
+        File name
+        <input
+          type="text"
+          id="bundle-filename"
+          class="save-dialog-input"
+          autocomplete="off"
+          spellcheck="false"
+          maxlength="200"
+        />
+      </label>
+      <div class="save-dialog-actions">
+        <button type="button" class="btn" id="bundle-save-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="bundle-save-confirm">Save</button>
+      </div>
+    </form>
+  </dialog>
 `
 
 const img = document.querySelector<HTMLImageElement>('#plan')!
@@ -846,6 +914,8 @@ const processFileWalk = document.querySelector<HTMLInputElement>('#process-file-
 const processFilePl = document.querySelector<HTMLInputElement>('#process-file-pl')!
 const processBtnPlot = document.querySelector<HTMLButtonElement>('#process-btn-plot')!
 const processBtnClearPlot = document.querySelector<HTMLButtonElement>('#process-btn-clear-plot')!
+const processBtnSaveBundle = document.querySelector<HTMLButtonElement>('#process-btn-save-bundle')!
+const processFileBundle = document.querySelector<HTMLInputElement>('#process-file-bundle')!
 const processShowPlLabels = document.querySelector<HTMLInputElement>('#process-show-pl-labels')!
 const processShowPlRoute = document.querySelector<HTMLInputElement>('#process-show-pl-route')!
 const processShowPlColoredTrail = document.querySelector<HTMLInputElement>('#process-show-pl-colored-trail')!
@@ -866,6 +936,9 @@ const processFilenamePl = document.querySelector<HTMLSpanElement>('#process-file
 const processLegend = document.querySelector<HTMLDivElement>('#process-legend')!
 const processHistogramWrap = document.querySelector<HTMLDivElement>('#process-histogram-wrap')!
 const processHistogramBody = document.querySelector<HTMLTableSectionElement>('#process-histogram-body')!
+const processHistogramPie = document.querySelector<SVGSVGElement>('#process-histogram-pie')!
+const processPlStopsEditor = document.querySelector<HTMLDivElement>('#process-pl-stops-editor')!
+const processPlStopsReset = document.querySelector<HTMLButtonElement>('#process-pl-stops-reset')!
 const processPlaceholder = document.querySelector<HTMLParagraphElement>('#process-placeholder')!
 const processMouseHint = document.querySelector<HTMLParagraphElement>('#process-mouse-hint')!
 const saveDialog = document.querySelector<HTMLDialogElement>('#save-dialog')!
@@ -890,6 +963,10 @@ const modePoi = document.querySelector<HTMLButtonElement>('#mode-poi')!
 const btnUndoPoi = document.querySelector<HTMLButtonElement>('#btn-undo-poi')!
 const btnClearPoi = document.querySelector<HTMLButtonElement>('#btn-clear-poi')!
 const poiDialog = document.querySelector<HTMLDialogElement>('#poi-dialog')!
+const bundleSaveDialog = document.querySelector<HTMLDialogElement>('#bundle-save-dialog')!
+const bundleSaveForm = document.querySelector<HTMLFormElement>('#bundle-save-form')!
+const bundleFilenameInput = document.querySelector<HTMLInputElement>('#bundle-filename')!
+const bundleSaveCancel = document.querySelector<HTMLButtonElement>('#bundle-save-cancel')!
 const poiForm = document.querySelector<HTMLFormElement>('#poi-form')!
 const poiLabelInput = document.querySelector<HTMLInputElement>('#poi-label')!
 const poiCancel = document.querySelector<HTMLButtonElement>('#poi-cancel')!
@@ -1140,25 +1217,87 @@ function syncCanvasSize(): void {
   }
 }
 
-/** Fixed path-loss color scale for Process overlay (dB): −30 (light blue) → −100 (dark grey). */
+/** Fixed path-loss color scale for Process overlay (dB): −120 … −30, clamped outside. */
 const PROCESS_PL_GOOD = -30
-const PROCESS_PL_BAD = -100
+const PROCESS_PL_BAD = -120
 
 type PlRgb = readonly [number, number, number]
 
-/** Stops from weak (−100) to strong (−30); greys below −90, warm colors toward −70, cool palette toward −30. */
-const PL_COLOR_STOPS: readonly { db: number; rgb: PlRgb }[] = [
-  { db: -100, rgb: [44, 44, 48] },
-  { db: -90, rgb: [125, 125, 128] },
-  { db: -80, rgb: [155, 85, 82] },
-  { db: -72, rgb: [210, 42, 38] },
-  { db: -68, rgb: [255, 118, 28] },
-  { db: -62, rgb: [255, 205, 45] },
-  { db: -54, rgb: [48, 155, 88] },
-  { db: -46, rgb: [28, 78, 168] },
-  { db: -38, rgb: [72, 138, 215] },
-  { db: -30, rgb: [186, 228, 255] },
+/** Default stops: red → orange → yellow → green → cyan → blue → white (strong signal). */
+const PL_COLOR_STOPS_DEFAULT: readonly { db: number; rgb: PlRgb }[] = [
+  { db: -120, rgb: [136, 2, 2] },
+  { db: -100, rgb: [244, 16, 16] },
+  { db: -90, rgb: [255, 120, 31] },
+  { db: -80, rgb: [255, 200, 0] },
+  { db: -72, rgb: [255, 255, 0] },
+  { db: -68, rgb: [64, 255, 26] },
+  { db: -62, rgb: [0, 250, 142] },
+  { db: -54, rgb: [4, 230, 246] },
+  { db: -46, rgb: [23, 131, 232] },
+  { db: -38, rgb: [148, 196, 255] },
+  { db: -30, rgb: [255, 255, 255] },
 ]
+
+const PL_STOPS_STORAGE_KEY = 'walkplotter-process-pl-stops-v3'
+
+type PlColorStop = { db: number; rgb: [number, number, number] }
+
+let plColorStops: PlColorStop[] = PL_COLOR_STOPS_DEFAULT.map((s) => ({
+  db: s.db,
+  rgb: [s.rgb[0], s.rgb[1], s.rgb[2]],
+}))
+
+function cloneDefaultPlStops(): PlColorStop[] {
+  return PL_COLOR_STOPS_DEFAULT.map((s) => ({
+    db: s.db,
+    rgb: [s.rgb[0], s.rgb[1], s.rgb[2]],
+  }))
+}
+
+function loadPlStopsFromStorage(): void {
+  plColorStops = cloneDefaultPlStops()
+  try {
+    const raw = localStorage.getItem(PL_STOPS_STORAGE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed) || parsed.length !== PL_COLOR_STOPS_DEFAULT.length) return
+    for (let i = 0; i < parsed.length; i++) {
+      const row = parsed[i] as { db?: unknown; rgb?: unknown }
+      const d = PL_COLOR_STOPS_DEFAULT[i]!
+      if (row?.db !== d.db || !Array.isArray(row.rgb) || row.rgb.length !== 3) return
+      const r = Number(row.rgb[0])
+      const g = Number(row.rgb[1])
+      const b = Number(row.rgb[2])
+      if (![r, g, b].every((n) => Number.isFinite(n) && n >= 0 && n <= 255)) return
+      plColorStops[i] = { db: d.db, rgb: [r, g, b] }
+    }
+  } catch {
+    plColorStops = cloneDefaultPlStops()
+  }
+}
+
+function savePlStopsToStorage(): void {
+  try {
+    localStorage.setItem(PL_STOPS_STORAGE_KEY, JSON.stringify(plColorStops))
+  } catch {
+    /* ignore */
+  }
+}
+
+function rgbToHex255(r: number, g: number, b: number): string {
+  const x = (n: number) =>
+    Math.max(0, Math.min(255, Math.round(n)))
+      .toString(16)
+      .padStart(2, '0')
+  return `#${x(r)}${x(g)}${x(b)}`
+}
+
+function hexToRgb255(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim())
+  if (!m?.[1]) return null
+  const n = parseInt(m[1], 16)
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+}
 
 function lerpChannel(a: number, b: number, t: number): number {
   return Math.round(a + (b - a) * t)
@@ -1166,7 +1305,7 @@ function lerpChannel(a: number, b: number, t: number): number {
 
 function pathLossToColor(pl: number): string {
   const x = Math.max(PROCESS_PL_BAD, Math.min(PROCESS_PL_GOOD, pl))
-  const stops = PL_COLOR_STOPS
+  const stops = plColorStops
   if (x <= stops[0]!.db) {
     const c = stops[0]!.rgb
     return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
@@ -1188,7 +1327,7 @@ function pathLossToColor(pl: number): string {
 }
 
 function pathLossScaleGradientCss(): string {
-  const pts = PL_COLOR_STOPS.map((s) => ({
+  const pts = plColorStops.map((s) => ({
     pct: ((s.db - PROCESS_PL_GOOD) / (PROCESS_PL_BAD - PROCESS_PL_GOOD)) * 100,
     color: pathLossToColor(s.db),
   })).sort((a, b) => a.pct - b.pct)
@@ -1196,6 +1335,8 @@ function pathLossScaleGradientCss(): string {
 }
 
 const PROCESS_HIST_BIN_WIDTH_DB = 20
+/** Histogram range always extends to this path loss (dB) so the weakest bin (label e.g. 100–120) exists for very weak samples. */
+const PROCESS_HIST_PL_HISTOGRAM_MIN = -120
 
 type PathLossBinRow = { low: number; high: number; count: number; seconds: number }
 
@@ -1203,6 +1344,7 @@ type PathLossBinRow = { low: number; high: number; count: number; seconds: numbe
  * Bins aligned to multiples of `binWidthDb` dB; half-open [low, high).
  * **Seconds:** each interval from sample `i` to `i+1` (from trail timestamps) is added to the bin
  * containing sample `i`'s path loss (time walking until the next plotted point).
+ * The minimum extent includes **−120 dB** so a **−120…−100 dB** bin appears (alongside existing 20 dB bins).
  */
 function pathLossHistogramBinsFromMerged(points: MergedPlotPoint[], binWidthDb: number): PathLossBinRow[] {
   if (points.length === 0) return []
@@ -1212,6 +1354,7 @@ function pathLossHistogramBinsFromMerged(points: MergedPlotPoint[], binWidthDb: 
     if (p.pathLoss < minV) minV = p.pathLoss
     if (p.pathLoss > maxV) maxV = p.pathLoss
   }
+  minV = Math.min(PROCESS_HIST_PL_HISTOGRAM_MIN, minV)
   const w = binWidthDb
   const start = Math.floor(minV / w) * w
   const endExclusive = Math.floor(maxV / w) * w + w
@@ -1241,10 +1384,130 @@ function pathLossHistogramBinsFromMerged(points: MergedPlotPoint[], binWidthDb: 
   return rows
 }
 
+/**
+ * Human-readable bin label: positive **loss magnitude** (no minus signs).
+ * For standard negative path-loss bins, signed half-open `[low, high)` maps to magnitude **(|high|, |low|]** so
+ * adjacent bins do not repeat the same integer at both edges (e.g. **81–100** then **101–120**, not 80–100 and 100–120).
+ */
 function formatPathLossBinLabel(low: number, high: number): string {
-  const a = low.toFixed(0)
-  const b = high.toFixed(0)
-  return `[${a}, ${b})`
+  if (high <= 0 && low < high) {
+    const magOpen = Math.abs(high)
+    const magClose = Math.abs(low)
+    const a = Math.floor(magOpen) + 1
+    const b = Math.ceil(magClose)
+    return `${a}-${b}`
+  }
+  const lo = Math.round(Math.abs(low))
+  const hi = Math.round(Math.abs(high))
+  return `${Math.min(lo, hi)}-${Math.max(lo, hi)}`
+}
+
+/** Bin midpoint (dB) for palette — same `pathLossToColor` as the Process map overlay. */
+function pathLossBinMidColor(low: number, high: number): string {
+  return pathLossToColor((low + high) / 2)
+}
+
+function onProcessPlStopColorInput(e: Event): void {
+  const t = e.target as HTMLInputElement
+  const i = Number(t.dataset.index)
+  if (!Number.isFinite(i) || i < 0 || i >= plColorStops.length) return
+  const rgb = hexToRgb255(t.value)
+  if (!rgb) return
+  plColorStops[i] = { db: plColorStops[i]!.db, rgb }
+  savePlStopsToStorage()
+  drawProcessOverlay()
+}
+
+function buildProcessPlStopsEditor(): void {
+  processPlStopsEditor.replaceChildren()
+  for (let i = 0; i < plColorStops.length; i++) {
+    const s = plColorStops[i]!
+    const row = document.createElement('div')
+    row.className = 'process-pl-stop-row'
+    const lab = document.createElement('span')
+    lab.className = 'process-pl-stop-db'
+    lab.textContent = `${s.db} dB`
+    const inp = document.createElement('input')
+    inp.type = 'color'
+    inp.className = 'process-pl-stop-color'
+    inp.value = rgbToHex255(s.rgb[0], s.rgb[1], s.rgb[2])
+    inp.title = `Colour at ${s.db} dB path loss`
+    inp.dataset.index = String(i)
+    inp.addEventListener('input', onProcessPlStopColorInput)
+    row.appendChild(lab)
+    row.appendChild(inp)
+    processPlStopsEditor.appendChild(row)
+  }
+}
+
+function initProcessPlColourScale(): void {
+  loadPlStopsFromStorage()
+  buildProcessPlStopsEditor()
+  processPlStopsReset.addEventListener('click', () => {
+    plColorStops = cloneDefaultPlStops()
+    savePlStopsToStorage()
+    buildProcessPlStopsEditor()
+    drawProcessOverlay()
+  })
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+function updateProcessHistogramPie(rows: PathLossBinRow[], totalCount: number): void {
+  const svg = processHistogramPie
+  svg.replaceChildren()
+  if (totalCount <= 0) return
+
+  const slices = rows.filter((r) => r.count > 0)
+  if (slices.length === 0) return
+
+  const cx = 50
+  const cy = 50
+  const r = 42
+
+  if (slices.length === 1) {
+    const row = slices[0]!
+    const fill = pathLossBinMidColor(row.low, row.high)
+    const c = document.createElementNS(SVG_NS, 'circle')
+    c.setAttribute('cx', String(cx))
+    c.setAttribute('cy', String(cy))
+    c.setAttribute('r', String(r))
+    c.setAttribute('fill', fill)
+    c.setAttribute('stroke', 'rgba(0,0,0,0.22)')
+    c.setAttribute('stroke-width', '0.75')
+    const title = document.createElementNS(SVG_NS, 'title')
+    title.textContent = `${formatPathLossBinLabel(row.low, row.high)}: ${row.count} (100%)`
+    c.appendChild(title)
+    svg.appendChild(c)
+    return
+  }
+
+  let a0 = -Math.PI / 2
+  for (const row of slices) {
+    const frac = row.count / totalCount
+    const delta = frac * 2 * Math.PI
+    const a1 = a0 + delta
+    const x0 = cx + r * Math.cos(a0)
+    const y0 = cy + r * Math.sin(a0)
+    const x1 = cx + r * Math.cos(a1)
+    const y1 = cy + r * Math.sin(a1)
+    const largeArc = delta > Math.PI ? 1 : 0
+    const fill = pathLossBinMidColor(row.low, row.high)
+    const path = document.createElementNS(SVG_NS, 'path')
+    path.setAttribute(
+      'd',
+      `M ${cx} ${cy} L ${x0.toFixed(4)} ${y0.toFixed(4)} A ${r} ${r} 0 ${largeArc} 1 ${x1.toFixed(4)} ${y1.toFixed(4)} Z`,
+    )
+    path.setAttribute('fill', fill)
+    path.setAttribute('stroke', 'rgba(0,0,0,0.22)')
+    path.setAttribute('stroke-width', '0.75')
+    const title = document.createElementNS(SVG_NS, 'title')
+    const pct = (100 * row.count) / totalCount
+    title.textContent = `${formatPathLossBinLabel(row.low, row.high)}: ${row.count} (${pct.toFixed(1)}%)`
+    path.appendChild(title)
+    svg.appendChild(path)
+    a0 = a1
+  }
 }
 
 function updateProcessHistogramTable(): void {
@@ -1252,6 +1515,7 @@ function updateProcessHistogramTable(): void {
   if (n === 0) {
     processHistogramWrap.hidden = true
     processHistogramBody.innerHTML = ''
+    processHistogramPie.replaceChildren()
     return
   }
   const rows = pathLossHistogramBinsFromMerged(processMergedPoints, PROCESS_HIST_BIN_WIDTH_DB)
@@ -1259,11 +1523,13 @@ function updateProcessHistogramTable(): void {
   const parts: string[] = []
   for (const r of rows) {
     const pct = total > 0 ? (100 * r.count) / total : 0
+    const sw = pathLossBinMidColor(r.low, r.high)
     parts.push(
-      `<tr><td>${formatPathLossBinLabel(r.low, r.high)}</td><td>${r.count}</td><td>${r.seconds.toFixed(1)}</td><td>${pct.toFixed(1)}</td></tr>`,
+      `<tr><td class="process-hist-col-swatch"><span class="process-hist-swatch" style="background:${sw}" title="Mid-bin colour" role="presentation"></span></td><td>${formatPathLossBinLabel(r.low, r.high)}</td><td>${r.count}</td><td>${r.seconds.toFixed(1)}</td><td>${pct.toFixed(1)}</td></tr>`,
     )
   }
   processHistogramBody.innerHTML = parts.join('')
+  updateProcessHistogramPie(rows, total)
   processHistogramWrap.hidden = false
 }
 
@@ -1349,11 +1615,27 @@ function updateProcessFsplChrome(): void {
   }
 }
 
+function updateProcessBundleButtons(): void {
+  const hasPlan = Boolean(processImg.naturalWidth)
+  const hasTrail = processTrailEditable.length > 0
+  const hasPl =
+    processPathLossCsvText.trim().length > 0 || Boolean(processFilePl.files?.[0])
+  processBtnSaveBundle.disabled = !(hasPlan && hasTrail && hasPl)
+}
+
 function updateProcessFileSummary(): void {
+  if (processBundleSummaryOverride) {
+    processFilenamePlan.textContent = processBundleSummaryOverride.plan
+    processFilenameWalk.textContent = processBundleSummaryOverride.walk
+    processFilenamePl.textContent = processBundleSummaryOverride.pl
+    updateProcessBundleButtons()
+    return
+  }
   const label = (f: File | undefined) => f?.name ?? '—'
   processFilenamePlan.textContent = label(processFilePlan.files?.[0])
   processFilenameWalk.textContent = label(processFileWalk.files?.[0])
   processFilenamePl.textContent = label(processFilePl.files?.[0])
+  updateProcessBundleButtons()
 }
 
 function clearProcessTrailState(): void {
@@ -1364,6 +1646,9 @@ function clearProcessTrailState(): void {
   processWalkTestDate = null
   processMergedPoints = []
   processMergedPointsRaw = []
+  processUnmatchedTrailPoints = []
+  processPathLossCsvText = ''
+  processBundleSummaryOverride = null
   processTrailDragIndex = null
   processNudgeTrail.checked = false
   processNudgeSnap.value = 'off'
@@ -1419,18 +1704,19 @@ function findTrailHitIndex(clientX: number, clientY: number, dotR: number): numb
 function updateProcessTrailChrome(): void {
   const hasTrail = processTrailEditable.length > 0
   const hasMap = Boolean(processImg.naturalWidth)
-  const hasPlotted = processMergedPoints.length > 0
-  const canNudge = hasTrail && hasMap && !hasPlotted
+  const hasPathLossOverlay =
+    processMergedPoints.length > 0 || processUnmatchedTrailPoints.length > 0
+  const canNudge = hasTrail && hasMap && !hasPathLossOverlay
   processNudgeTrail.disabled = !canNudge
   if (!canNudge) {
     processNudgeTrail.checked = false
     processTrailDragIndex = null
   }
-  processResetTrail.disabled = !hasTrail || !processTrailPixelsDirty() || hasPlotted
+  processResetTrail.disabled = !hasTrail || !processTrailPixelsDirty() || hasPathLossOverlay
   const saveDisabled = !hasTrail || !processTrailPixelsDirty()
   processSaveWalkEdited.disabled = saveDisabled
   processSaveWalkOriginal.disabled = saveDisabled
-  processBtnClearPlot.disabled = !hasPlotted
+  processBtnClearPlot.disabled = !hasPathLossOverlay
   processNudgeSnap.disabled = !canNudge || processTrailEditable.length < 2
   if (!canNudge || processTrailEditable.length < 2) {
     processNudgeSnap.value = 'off'
@@ -1447,12 +1733,20 @@ function updateProcessTrailChrome(): void {
 
 function onTrailPointerDown(e: PointerEvent): void {
   if (e.altKey && e.button === 0) return
-  if (e.button !== 0 || !processNudgeTrail.checked || processMergedPoints.length > 0) return
+  if (
+    e.button !== 0 ||
+    !processNudgeTrail.checked ||
+    processMergedPoints.length > 0 ||
+    processUnmatchedTrailPoints.length > 0
+  ) {
+    return
+  }
   const i = findTrailHitIndex(e.clientX, e.clientY, processTrailDotRadius())
   if (i === null) return
   e.preventDefault()
   processMergedPoints = []
   processMergedPointsRaw = []
+  processUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processTrailDragIndex = i
   processCanvas.setPointerCapture(e.pointerId)
@@ -1581,6 +1875,7 @@ function onTrailPointerMove(e: PointerEvent): void {
   processTrailEditable[idx] = { ...cur, x: c.x, y: c.y }
   processMergedPoints = []
   processMergedPointsRaw = []
+  processUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   drawProcessOverlay()
   e.preventDefault()
@@ -1656,20 +1951,25 @@ function drawProcessOverlay(): void {
   const h = processCanvas.height / (window.devicePixelRatio || 1)
   ctx.clearRect(0, 0, w, h)
 
-  const hasPlotted = processMergedPoints.length > 0
+  const showPathLossOverlay =
+    processMergedPoints.length > 0 || processUnmatchedTrailPoints.length > 0
   const hasTrail = processTrailEditable.length > 0
   const dotR = Math.max(3, Math.min(w, h) / 80)
 
-  if (hasPlotted) {
-    let minPl = processMergedPoints[0]!.pathLoss
-    let maxPl = minPl
-    for (const p of processMergedPoints) {
-      if (p.pathLoss < minPl) minPl = p.pathLoss
-      if (p.pathLoss > maxPl) maxPl = p.pathLoss
-    }
+  if (showPathLossOverlay) {
     const routeColors = getOverlayColors()
     const routePs = Math.min(1.2, Math.max(0.8, dotR / 5))
     const trailDiameter = 2 * dotR
+    let minPl = 0
+    let maxPl = 0
+    if (processMergedPoints.length > 0) {
+      minPl = processMergedPoints[0]!.pathLoss
+      maxPl = minPl
+      for (const p of processMergedPoints) {
+        if (p.pathLoss < minPl) minPl = p.pathLoss
+        if (p.pathLoss > maxPl) maxPl = p.pathLoss
+      }
+    }
     if (processShowPlColoredTrail.checked && processMergedPoints.length > 1) {
       ctx.lineJoin = 'round'
       ctx.lineCap = 'round'
@@ -1735,7 +2035,15 @@ function drawProcessOverlay(): void {
         }
       }
     }
-    if (processShowPlLabels.checked) {
+    for (const pt of processUnmatchedTrailPoints) {
+      const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+      if (!q) continue
+      ctx.fillStyle = '#000000'
+      ctx.beginPath()
+      ctx.arc(q.x, q.y, dotR, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    if (processShowPlLabels.checked && processMergedPoints.length > 0) {
       const fontPx = Math.max(11, Math.min(16, Math.min(w, h) / 48))
       ctx.font = `600 ${fontPx}px system-ui, Segoe UI, sans-serif`
       ctx.textAlign = 'left'
@@ -1759,20 +2067,33 @@ function drawProcessOverlay(): void {
     const nInterp = processMergedPoints.filter((p) => p.source === 'interpolated').length
     const nUser = processMergedPoints.length - nInterp
     const walkTypesLegend =
-      nUser > 0 || nInterp > 0
+      processMergedPoints.length > 0 && (nUser > 0 || nInterp > 0)
         ? `<span>Walk: <strong>${nUser}</strong> original <span class="process-legend-user-ring" title="Original (non-interpolated) points — grey ring; fill is still path loss (dB)."></span> · <strong>${nInterp}</strong> interpolated (no ring)</span>`
+        : ''
+    const unmatchedLegend =
+      processUnmatchedTrailPoints.length > 0
+        ? `<span><strong>${processUnmatchedTrailPoints.length}</strong> trail pt(s): no RF within <strong>${DEFAULT_MAX_MATCH_MS / 1000}s</strong> — <span class="process-legend-unmatched" title="Nearest path-loss log sample was farther than this in time (common in weak areas with sparse logging)."></span> black dot</span>`
         : ''
     processLegend.hidden = false
     const fsplLegend =
       processMergedPointsRaw.length > 0 && processFsplEnable.checked
         ? `<span>FSPL: estimated at <strong>${processFsplTarget.value}</strong> MHz (walk at <strong>${processFsplRef.value}</strong> MHz, free space)</span>`
         : ''
+    const dataRangeSpan =
+      processMergedPoints.length > 0
+        ? `<span><strong>${processMergedPoints.length}</strong> matched · PL <strong>${minPl.toFixed(1)}</strong>–<strong>${maxPl.toFixed(1)}</strong> dB</span>`
+        : ''
+    const scaleSpan =
+      processMergedPoints.length > 0
+        ? `<span>Color scale <strong>−30</strong> … <strong>−120</strong> dB (outside range is clamped)</span>
+    <span class="process-legend-gradient" style="background:${pathLossScaleGradientCss()}"></span>`
+        : ''
     processLegend.innerHTML = `<div class="process-legend-inner">
-    <span>Color scale <strong>−30</strong> … <strong>−100</strong> dB (outside range is clamped)</span>
-    <span class="process-legend-gradient" style="background:${pathLossScaleGradientCss()}"></span>
+    ${scaleSpan}
     ${walkTypesLegend}
+    ${unmatchedLegend}
     ${fsplLegend}
-    <span>${processMergedPoints.length} pts · data <strong>${minPl.toFixed(1)}</strong>–<strong>${maxPl.toFixed(1)}</strong> dB</span>
+    ${dataRangeSpan}
   </div>`
     updateProcessHistogramTable()
     updateProcessTrailChrome()
@@ -1782,7 +2103,10 @@ function drawProcessOverlay(): void {
   if (hasTrail) {
     const colors = getOverlayColors()
     const trailPs = Math.min(1.25, Math.max(0.85, dotR / 5.5))
-    const nudgeOn = processNudgeTrail.checked && processMergedPoints.length === 0
+    const nudgeOn =
+      processNudgeTrail.checked &&
+      processMergedPoints.length === 0 &&
+      processUnmatchedTrailPoints.length === 0
 
     if (processTrailEditable.length > 0) {
       ctx.strokeStyle = colors.trailLine
@@ -1888,6 +2212,107 @@ function readFileAsText(f: File): Promise<string> {
   })
 }
 
+function downloadJsonFile(filename: string, text: string): void {
+  const blob = new Blob([text], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function safeBundleDownloadFilename(raw: string): string {
+  let s = raw.trim().replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, ' ').replace(/^\.+/, '')
+  if (!s) s = 'walkplotter-process-bundle'
+  if (!s.toLowerCase().endsWith('.json')) s += '.json'
+  return s.slice(0, 200)
+}
+
+/** Build and download bundle; `downloadFilename` should already be sanitized (e.g. via `safeBundleDownloadFilename`). */
+async function saveProcessBundle(downloadFilename: string): Promise<boolean> {
+  if (!processImg.naturalWidth || !processTrailEditable.length) return false
+  let plText = processPathLossCsvText.trim()
+  const plFile = processFilePl.files?.[0]
+  if (!plText && plFile) plText = await readFileAsText(plFile)
+  if (!plText) {
+    processStatus.textContent =
+      'Choose a path loss CSV (or load a bundle that includes one) before saving a bundle.'
+    return false
+  }
+  const walkText = serializeWalkplotterEditable(
+    processWalkPreamble,
+    processTrailEditable,
+    processWalkTail
+  )
+  const res = await fetch(processImg.src)
+  const blob = await res.blob()
+  const buf = await blob.arrayBuffer()
+  const dataBase64 = uint8ArrayToBase64(new Uint8Array(buf))
+  const planName =
+    processFilePlan.files?.[0]?.name ?? processBundleSummaryOverride?.plan ?? 'floor-plan.png'
+  const safePlan = planName.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, ' ').slice(0, 200)
+  const bundle: ProcessBundleV1 = {
+    walkplotterBundleVersion: PROCESS_BUNDLE_VERSION,
+    app: 'walkplotter',
+    savedAt: new Date().toISOString(),
+    floorPlan: {
+      fileName: safePlan || 'floor-plan.png',
+      mimeType: blob.type || 'image/png',
+      dataBase64,
+    },
+    walkplotterCsv: walkText.replace(/^\uFEFF/, ''),
+    pathLossCsv: plText.replace(/^\uFEFF/, ''),
+  }
+  const json = JSON.stringify(bundle)
+  downloadJsonFile(downloadFilename, json)
+  processStatus.textContent = `Saved "${downloadFilename}" (~${(json.length / 1024).toFixed(0)} KB). Use Load bundle to restore.`
+  return true
+}
+
+async function applyProcessBundle(bundle: ProcessBundleV1): Promise<void> {
+  if (processPlanObjectUrl) {
+    URL.revokeObjectURL(processPlanObjectUrl)
+    processPlanObjectUrl = null
+  }
+  processMergedPoints = []
+  processMergedPointsRaw = []
+  processUnmatchedTrailPoints = []
+  processPathLossCsvText = bundle.pathLossCsv
+  processFilePlan.value = ''
+  processFileWalk.value = ''
+  processFilePl.value = ''
+  processNudgeTrail.checked = false
+  processTrailDragIndex = null
+  processFsplEnable.checked = false
+  updateProcessFsplChrome()
+  processFsplDelta.textContent = ''
+
+  const imgBlob = base64ToBlob(bundle.floorPlan.dataBase64, bundle.floorPlan.mimeType)
+  processPlanObjectUrl = URL.createObjectURL(imgBlob)
+  processImg.src = processPlanObjectUrl
+
+  const parsed = parseWalkplotterEditable(bundle.walkplotterCsv)
+  if (!parsed || !parsed.trail.length) {
+    processStatus.textContent = 'Bundle Walkplotter CSV could not be parsed.'
+    return
+  }
+  processWalkPreamble = parsed.preamble
+  processWalkTail = parsed.tail
+  processTrailEditable = parsed.trail.map((r) => ({ ...r }))
+  processTrailOriginal = parsed.trail.map((r) => ({ ...r }))
+  processWalkTestDate = extractWalkplotterTestDate(bundle.walkplotterCsv)
+
+  processBundleSummaryOverride = {
+    plan: bundle.floorPlan.fileName,
+    walk: '(from bundle)',
+    pl: '(from bundle)',
+  }
+  updateProcessFileSummary()
+  processStatus.textContent = `Loaded process bundle (saved ${bundle.savedAt.slice(0, 19)}). Tap Plot path loss to redraw the overlay.`
+  drawProcessOverlay()
+}
+
 /** Process merge: use elapsed t=0 semantics from loaded Walkplotter CSV preamble. */
 function mergeTimeOptsFromPreamble(): MergeTimeOptions | undefined {
   if (!processWalkPreamble) return undefined
@@ -1903,6 +2328,7 @@ function mergeTimeOptsFromPreamble(): MergeTimeOptions | undefined {
 function runProcessPlot(): void {
   const walkFile = processFileWalk.files?.[0]
   const plFile = processFilePl.files?.[0]
+  const plFromMemory = processPathLossCsvText.trim().length > 0
   if (!processImg.naturalWidth) {
     processStatus.textContent = 'Load a floor plan image first.'
     return
@@ -1911,23 +2337,32 @@ function runProcessPlot(): void {
     processStatus.textContent = 'Load a Walkplotter CSV with trail rows first.'
     return
   }
-  if (!plFile) {
-    processStatus.textContent = 'Choose a path loss CSV.'
+  if (!plFile && !plFromMemory) {
+    processStatus.textContent = 'Choose a path loss CSV (or load a process bundle).'
     return
   }
   void (async () => {
     try {
-      const plText = await readFileAsText(plFile)
+      const plText = plFile ? await readFileAsText(plFile) : processPathLossCsvText
       let testDate = processWalkTestDate
       if (!testDate && walkFile) {
         const walkText = await readFileAsText(walkFile)
         testDate = extractWalkplotterTestDate(walkText)
       }
       if (!testDate) {
+        const wtxt = serializeWalkplotterEditable(
+          processWalkPreamble,
+          processTrailEditable,
+          processWalkTail
+        )
+        testDate = extractWalkplotterTestDate(wtxt)
+      }
+      if (!testDate) {
         processStatus.textContent =
           'Walkplotter CSV has no # test_date_local: YYYY-MM-DD header — cannot align times.'
         processMergedPoints = []
         processMergedPointsRaw = []
+        processUnmatchedTrailPoints = []
         updateProcessFsplChrome()
         drawProcessOverlay()
         return
@@ -1938,35 +2373,43 @@ function runProcessPlot(): void {
           'No path loss rows found (expect HH:MM:SS first field, 4th field = number).'
         processMergedPoints = []
         processMergedPointsRaw = []
+        processUnmatchedTrailPoints = []
         updateProcessFsplChrome()
         drawProcessOverlay()
         return
       }
       const trailForMerge: WalkplotterTrailRow[] = processTrailEditable
-      const merged = mergeByNearestTime(
+      const { merged, unmatched } = mergeByNearestTime(
         testDate,
         trailForMerge,
         plRows,
         DEFAULT_MAX_MATCH_MS,
         mergeTimeOptsFromPreamble()
       )
-      if (!merged.length) {
-        processMergedPoints = []
-        processMergedPointsRaw = []
-        updateProcessFsplChrome()
-        processStatus.textContent = `No points matched within ${DEFAULT_MAX_MATCH_MS / 1000}s — check times and date (${testDate}).`
-        drawProcessOverlay()
-        return
-      }
+      processUnmatchedTrailPoints = unmatched
       processMergedPointsRaw = merged.map((p) => ({ ...p }))
       rebuildProcessMergedFromFspl()
       updateProcessFsplChrome()
-      processStatus.textContent = `Matched ${processMergedPoints.length} of ${processTrailEditable.length} trail samples to nearest RF reading (date ${testDate}).`
+      const dtSec = DEFAULT_MAX_MATCH_MS / 1000
+      if (merged.length === 0) {
+        processStatus.textContent =
+          unmatched.length > 0
+            ? `No RF sample within ${dtSec}s of any trail time — ${unmatched.length} position(s) shown as black dots (weak areas often log sparser; check clock sync).`
+            : `No points matched within ${dtSec}s — check times and date (${testDate}).`
+        drawProcessOverlay()
+        return
+      }
+      const uMsg =
+        unmatched.length > 0
+          ? ` ${unmatched.length} trail pt(s) had no RF within ${dtSec}s (black dots).`
+          : ''
+      processStatus.textContent = `Matched ${merged.length} of ${processTrailEditable.length} trail samples to nearest RF reading (date ${testDate}).${uMsg}`
       drawProcessOverlay()
     } catch (e) {
       processStatus.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`
       processMergedPoints = []
       processMergedPointsRaw = []
+      processUnmatchedTrailPoints = []
       updateProcessFsplChrome()
       drawProcessOverlay()
     }
@@ -2293,6 +2736,7 @@ tabControls.addEventListener('click', () => setTab('controls'))
 tabProcess.addEventListener('click', () => setTab('process'))
 
 processFilePlan.addEventListener('change', () => {
+  processBundleSummaryOverride = null
   const f = processFilePlan.files?.[0]
   if (processPlanObjectUrl) {
     URL.revokeObjectURL(processPlanObjectUrl)
@@ -2320,9 +2764,11 @@ processFilePlan.addEventListener('change', () => {
 
 processFileWalk.addEventListener('change', () => {
   void (async () => {
+    processBundleSummaryOverride = null
     updateProcessFileSummary()
     processMergedPoints = []
     processMergedPointsRaw = []
+    processUnmatchedTrailPoints = []
     updateProcessFsplChrome()
     processTrailDragIndex = null
     processNudgeTrail.checked = false
@@ -2357,6 +2803,8 @@ processFileWalk.addEventListener('change', () => {
       processTrailOriginal = parsed.trail.map((r) => ({ ...r }))
       processWalkTestDate = extractWalkplotterTestDate(text)
       processMergedPoints = []
+      processMergedPointsRaw = []
+      processUnmatchedTrailPoints = []
       const tsInfo = extractWalkplotterTimestampInfo(text)
       let tsNote = ''
       if (tsInfo.semantics === 'elapsed_since_session_start') {
@@ -2381,7 +2829,58 @@ processFileWalk.addEventListener('change', () => {
   })()
 })
 
-processFilePl.addEventListener('change', updateProcessFileSummary)
+processFilePl.addEventListener('change', () => {
+  void (async () => {
+    processBundleSummaryOverride = null
+    const f = processFilePl.files?.[0]
+    processPathLossCsvText = f ? await readFileAsText(f) : ''
+    updateProcessFileSummary()
+  })()
+})
+
+processBtnSaveBundle.addEventListener('click', () => {
+  if (processBtnSaveBundle.disabled) return
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+  bundleFilenameInput.value = `walkplotter-process-bundle-${stamp}`
+  bundleSaveDialog.showModal()
+  queueMicrotask(() => {
+    bundleFilenameInput.focus()
+    bundleFilenameInput.select()
+  })
+})
+
+bundleSaveCancel.addEventListener('click', () => {
+  bundleSaveDialog.close()
+})
+
+bundleSaveForm.addEventListener('submit', (e) => {
+  e.preventDefault()
+  const name = safeBundleDownloadFilename(bundleFilenameInput.value)
+  void (async () => {
+    const ok = await saveProcessBundle(name)
+    if (ok) bundleSaveDialog.close()
+  })()
+})
+
+processFileBundle.addEventListener('change', () => {
+  void (async () => {
+    const f = processFileBundle.files?.[0]
+    processFileBundle.value = ''
+    if (!f) return
+    try {
+      const text = await readFileAsText(f)
+      const bundle = parseProcessBundleJson(text)
+      if (!bundle) {
+        processStatus.textContent =
+          'Not a valid Walkplotter process bundle (expected version 1 JSON from Save process bundle).'
+        return
+      }
+      await applyProcessBundle(bundle)
+    } catch (e) {
+      processStatus.textContent = `Bundle load error: ${e instanceof Error ? e.message : String(e)}`
+    }
+  })()
+})
 
 processImg.addEventListener('load', () => {
   processPlaceholder.hidden = true
@@ -2390,6 +2889,7 @@ processImg.addEventListener('load', () => {
   processMouseHint.hidden = false
   resetProcessView()
   syncProcessOverlayCanvas()
+  updateProcessBundleButtons()
   drawProcessOverlay()
 })
 
@@ -2397,6 +2897,7 @@ processBtnPlot.addEventListener('click', () => runProcessPlot())
 processBtnClearPlot.addEventListener('click', () => {
   processMergedPoints = []
   processMergedPointsRaw = []
+  processUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processFsplDelta.textContent = ''
   drawProcessOverlay()
@@ -2425,6 +2926,7 @@ processResetTrail.addEventListener('click', () => {
   processTrailEditable = processTrailOriginal.map((r) => ({ ...r }))
   processMergedPoints = []
   processMergedPointsRaw = []
+  processUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processFsplDelta.textContent = ''
   drawProcessOverlay()
@@ -2900,5 +3402,6 @@ syncInterpControl()
 syncPinSizeControl()
 syncColorPickersFromCss()
 fillFsplSelectOptions()
+initProcessPlColourScale()
 updateChrome()
 void loadDefaultFloorPlan()
