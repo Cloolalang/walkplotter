@@ -14,8 +14,8 @@ A small **offline-friendly** web app for walking a path on a floor plan: drop **
 - **Trail** mode records taps with local time; optional interpolation along straight segments when taps are more than 1 second apart.
 - **POI** mode for separate labeled pins (anything you want to mark on the map without a timestamp); optional second CSV export (pixels only, no timestamps).
 - **Map** / **Controls** / **Process** tabs: large map, tools and export, and **post-processing** (path loss on the floor plan).
-- Pin size, crosshairs, pause/resume, undo, CSV download.
-- **Map** session bar: **live clock** (updates every second)—**Local time** `HH:MM:SS` when using wall-clock timestamps, or **Elapsed** `H:MM:SS` after **Session t = 0**, matching the active export mode.
+- Pin size, crosshairs, **Pause / Resume** on the **Map** tab (same button), undo, CSV download.
+- **Map** session bar: **live clock** (updates every second)—**Local time** `HH:MM:SS` when using wall-clock timestamps, or **Elapsed** `H:MM:SS` after **Session t = 0**, matching the active export mode. **Pause** does **not** freeze this clock; it only stops new trail pins until you **Resume**.
 - **Process** tab: **zoom and pan** (View bar, wheel, drag; with **Nudge trail**, **left-drag** on empty space, **middle-drag**, or **Alt + drag** to pan); **nudge trail** pixels and **save** CSV; **Plot path loss** with fixed **−30…−100 dB** scale (path loss from your CSV), optional **FSPL frequency estimate** (free-space **Δ** dB only—**indicative / experimental**; see Process manual), **20 dB histogram** (count, **seconds** of walk per bin, %), optional **Point labels**, **Show route** (thin polyline), and **Color-coded trail** (continuous stroke with per-segment gradient; **with 2+ plotted points** hides the circular markers so only the ribbon shows). **Original** walk samples (**user**) use a **grey ring**; **interpolated** samples have **no ring**—in **trail preview** and on the path-loss overlay when markers are visible (fill color encodes path loss in **dB**). **Map** tab: optional **Session t = 0** so trail CSV timestamps are **elapsed** from a common start (aligned with zeroed hardware clocks).
 
 ---
@@ -36,7 +36,7 @@ Run the dev server (`npm run dev`) and open the URL shown in the terminal, or se
 
 1. In **Controls**, ensure **Trail** is selected (not **POI**).
 2. Tap the map to drop **trail pins**. By default each pin gets **local wall-clock** time; the exported CSV uses `HH:MM:SS` and a test date in the header. Optionally use **Map → Session t = 0** when you **zero tester and transponder clocks together**: timestamps export as **elapsed** time `H:MM:SS` from that instant (see **Session time zero** below). A badge shows when this mode is active; **Wall clock** returns to normal timestamps.
-3. **Pause** stops recording new trail pins (for example before you move to another area). **Resume** continues the same trail. Pausing inserts a **segment break** so the next tap does not connect with a line to the previous segment.
+3. On the **Map** tab, **Pause** stops **new trail pins** only (for example before you move to another area); tap **Resume** on the same button to continue. The **map clock** (local or elapsed time in the session bar) **keeps running**—pausing does **not** stop it. Pausing inserts a **segment break** so the next tap does not connect with a line to the previous segment.
 4. **Crosshairs** (optional) draws guide lines through your last **user** pin to help align the next tap along horizontal or vertical lines.
 5. **Interpolation step**: if two trail taps are **more than one second apart**, Walkplotter adds synthetic points along the **straight line** between them, spaced by this interval (seconds). Adjust the value under Controls when a plan is loaded.
 
@@ -45,7 +45,7 @@ Run the dev server (`npm run dev`) and open the URL shown in the terminal, or se
 Use this when you want the trail CSV and your **path-loss log** to share the **same time base** after you reset hardware clocks.
 
 1. On the **Map** tab (floor plan loaded, **Trail** mode), tap **Session t = 0** at the same moment you zero the **sender** and **transponder** (or immediately after). If you already have trail pins, Walkplotter asks to **clear the trail** first—start the walked path **after** t = 0 for a clean session.
-2. While active, a **green badge** reads **Timestamps: elapsed from session t = 0**. The **Session t = 0** button is hidden; tap **Wall clock** to go back to normal local times (e.g. for a walk without hardware sync). The **clock** on the right of the bar tracks the same mode: **Elapsed** `H:MM:SS` live after t = 0, or **Local time** `HH:MM:SS` in wall-clock mode (both update every second while a floor plan is loaded).
+2. While active, a **green badge** reads **Timestamps: elapsed from session t = 0**. The **Session t = 0** button is hidden; tap **Wall clock** to go back to normal local times (e.g. for a walk without hardware sync). The **clock** on the right of the bar tracks the same mode: **Elapsed** `H:MM:SS` live after t = 0, or **Local time** `HH:MM:SS` in wall-clock mode (both update every second while a floor plan is loaded, **including while trail recording is paused**).
 3. Exported CSV includes `# timestamp_semantics: elapsed_since_session_start` and `# session_epoch_ms: …`. The first column is **elapsed** `H:MM:SS` from that epoch (not wall-clock time of day).
 4. **Process tab:** Your **path-loss CSV** must use the **same** convention: column 1 = elapsed `H:MM:SS` from **that** t = 0 (and the same `# session_epoch_ms` is embedded in the Walkplotter file so **Plot path loss** can align rows). If you only have wall-clock logs, use **Wall clock** on the map and do not use **Session t = 0**.
 
