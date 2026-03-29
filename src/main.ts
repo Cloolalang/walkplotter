@@ -539,7 +539,6 @@ app.innerHTML = `
         <button type="button" class="mode-btn" id="mode-poi" disabled title="Points of interest">POI</button>
       </div>
       <button type="button" class="btn" id="btn-stop" disabled title="Save CSV (and optional JPG). Available while recording, or after Pause if you have trail or POI data.">Stop &amp; save…</button>
-      <button type="button" class="btn" id="btn-resume" disabled hidden>Resume recording</button>
       <button type="button" class="btn" id="btn-download" disabled>Download CSV</button>
       <button type="button" class="btn" id="btn-download-poi-csv" disabled title="POI markers: pixels only, no timestamps">POI CSV</button>
       <button type="button" class="btn" id="btn-undo-poi" disabled>Undo POI</button>
@@ -780,7 +779,6 @@ const canvas = document.querySelector<HTMLCanvasElement>('#overlay')!
 const fileInput = document.querySelector<HTMLInputElement>('#file')!
 const btnPause = document.querySelector<HTMLButtonElement>('#btn-pause')!
 const btnStop = document.querySelector<HTMLButtonElement>('#btn-stop')!
-const btnResume = document.querySelector<HTMLButtonElement>('#btn-resume')!
 const btnDownload = document.querySelector<HTMLButtonElement>('#btn-download')!
 const btnUndo = document.querySelector<HTMLButtonElement>('#btn-undo')!
 const btnClear = document.querySelector<HTMLButtonElement>('#btn-clear')!
@@ -2060,12 +2058,18 @@ function updateChrome(): void {
   modeTrail.classList.toggle('active', placementMode === 'trail')
   modePoi.classList.toggle('active', placementMode === 'poi')
 
-  btnPause.disabled = !hasMap || !recording || placementMode === 'poi'
+  btnPause.disabled = !hasMap || placementMode === 'poi'
+  if (placementMode === 'trail') {
+    btnPause.textContent = recording ? 'Pause' : 'Resume'
+    btnPause.title = recording
+      ? 'Pause trail recording (segment break until you resume)'
+      : 'Resume trail recording'
+  } else {
+    btnPause.textContent = 'Pause'
+    btnPause.title = 'Pause / Resume apply in Trail mode'
+  }
   const hasExportableData = hasPoints || hasPoi
   btnStop.disabled = !hasMap || (!recording && !hasExportableData)
-  const showResume = hasMap && !recording
-  btnResume.hidden = !showResume
-  btnResume.disabled = !showResume
 
   btnDownload.disabled = !hasPoints && !hasPoi
   btnDownloadPoiCsv.disabled = !hasPoi
@@ -2090,13 +2094,14 @@ function updateChrome(): void {
       'POI — tap to place · pinch zoom · drag to pan · Controls for mode & export'
   } else if (recording) {
     hintMain.textContent =
-      'Trail mode: tap to drop pins. Pinch to zoom, drag to pan; zoom buttons are under Controls. Crosshairs on the last pin help align the next tap. Pause before walking elsewhere, then Resume.'
+      'Trail mode: tap to drop pins. Pinch to zoom, drag to pan; zoom buttons are under Controls. Crosshairs on the last pin help align the next tap. Pause on the Map tab before walking elsewhere, then Resume there.'
     hintMap.textContent =
-      'Trail — tap to pin · pinch zoom · drag to pan · Controls for pause, save, CSV'
+      'Trail — tap to pin · Pause/Resume on Map · pinch zoom · drag to pan · Controls for save, CSV'
   } else {
     hintMain.textContent =
-      'Recording paused — Resume to continue the trail, switch to POI to add markers, or Stop & save… to export (POI-only is OK).'
-    hintMap.textContent = 'Trail paused — Resume, change mode, or Stop & save…'
+      'Recording paused — tap Resume on the Map tab to continue the trail, switch to POI to add markers, or Stop & save… to export (POI-only is OK).'
+    hintMap.textContent =
+      'Trail paused — Resume on Map, change mode, or Stop & save…'
   }
   updateSessionT0Chrome()
   syncMapClock()
@@ -2717,9 +2722,13 @@ colorPin.addEventListener('input', () => {
 })
 
 btnPause.addEventListener('click', () => {
-  if (!img.naturalWidth || !recording) return
-  recording = false
-  trail.breakSegment()
+  if (!img.naturalWidth || placementMode === 'poi') return
+  if (recording) {
+    recording = false
+    trail.breakSegment()
+  } else {
+    recording = true
+  }
   redraw()
   updateChrome()
 })
@@ -2731,12 +2740,6 @@ btnStop.addEventListener('click', () => {
   recording = false
   updateChrome()
   if (hasExportableData) openSaveDialog()
-})
-
-btnResume.addEventListener('click', () => {
-  if (!img.naturalWidth) return
-  recording = true
-  updateChrome()
 })
 
 saveForm.addEventListener('submit', (e) => {
