@@ -31,6 +31,14 @@ export type MergedPlotPoint = {
 
 const DATE_RE = /^#\s*test_date_local:\s*(\d{4}-\d{2}-\d{2})\s*$/i
 const POI_SECTION = /^#\s*section:\s*poi/i
+const SEMANTICS_RE = /^#\s*timestamp_semantics:\s*(.+)$/i
+const SESSION_EPOCH_RE = /^#\s*session_epoch_ms:\s*(\d+)\s*$/i
+
+/** How timestamps in column 1 are interpreted for Process merge. */
+export type TimestampSemantics = 'wall_clock' | 'elapsed_since_session_start'
+
+const HMS_DURATION_RE = /^\d+:\d{2}:\d{2}$/
+const HMS_WALL_RE = /^\d{1,2}:\d{2}:\d{2}$/
 
 function parseCsvLine(line: string): string[] {
   const cells: string[] = []
@@ -81,6 +89,43 @@ export function extractWalkplotterTestDate(text: string): string | null {
   return null
 }
 
+/** Parse `# timestamp_semantics` and `# session_epoch_ms` for elapsed session exports. */
+export function extractWalkplotterTimestampInfo(text: string): {
+  semantics: TimestampSemantics
+  sessionEpochMs: number | null
+} {
+  let semantics: TimestampSemantics = 'wall_clock'
+  let sessionEpochMs: number | null = null
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    const sm = SEMANTICS_RE.exec(line)
+    if (sm) {
+      const v = sm[1]!.trim().toLowerCase()
+      if (v.includes('elapsed')) semantics = 'elapsed_since_session_start'
+      else semantics = 'wall_clock'
+    }
+    const em = SESSION_EPOCH_RE.exec(line)
+    if (em) {
+      const n = Number(em[1])
+      if (Number.isFinite(n)) sessionEpochMs = n
+    }
+  }
+  return { semantics, sessionEpochMs }
+}
+
+/**
+ * Parse H:MM:SS as a **duration** (hours may be > 23). Used for elapsed_since_session_start CSVs.
+ */
+export function parseDurationHmsToMs(hms: string): number | null {
+  const m = /^(\d+):(\d{2}):(\d{2})$/.exec(hms.trim())
+  if (!m) return null
+  const h = Number(m[1])
+  const mi = Number(m[2])
+  const s = Number(m[3])
+  if (!Number.isFinite(h) || mi > 59 || s > 59) return null
+  return ((h * 60 + mi) * 60 + s) * 1000
+}
+
 /**
  * Data rows: timestamp,x,y,source,new_segment — stops before POI section or non-data lines.
  */
@@ -105,7 +150,7 @@ export function parseWalkplotterTrailRows(text: string): WalkplotterTrailRow[] {
     const y = Number(cells[2])
     const source = (cells[3] ?? 'user').trim()
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue
-    if (!/^\d{1,2}:\d{2}:\d{2}$/.test(ts)) continue
+    if (!HMS_WALL_RE.test(ts) && !HMS_DURATION_RE.test(ts)) continue
     rows.push({ timestamp: ts, x, y, source })
   }
   return rows
@@ -164,7 +209,7 @@ export function parseWalkplotterEditable(text: string): {
     const source = (cells[3] ?? 'user').trim()
     const newSegment = (cells[4] ?? '0').trim()
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue
-    if (!/^\d{1,2}:\d{2}:\d{2}$/.test(ts)) continue
+    if (!HMS_WALL_RE.test(ts) && !HMS_DURATION_RE.test(ts)) continue
     trail.push({ timestamp: ts, x, y, source, newSegment })
   }
 
@@ -210,7 +255,7 @@ export function parsePathLossCsv(text: string): PathLossRow[] {
     const time = parts[0]!.trim()
     const pl = Number(parts[3]!.trim())
     if (!Number.isFinite(pl)) continue
-    if (!/^\d{1,2}:\d{2}:\d{2}$/.test(time)) continue
+    if (!HMS_WALL_RE.test(time) && !HMS_DURATION_RE.test(time)) continue
     out.push({ time, pathLoss: pl })
   }
   return out
@@ -225,26 +270,54 @@ function localMs(dateYmd: string, hms: string): number {
 /** Default: match RF sample within 3s of each trail timestamp. */
 export const DEFAULT_MAX_MATCH_MS = 3000
 
+export type MergeTimeOptions = {
+  semantics: TimestampSemantics
+  sessionEpochMs: number | null
+}
+
+function rowTimeMs(
+  testDateYmd: string,
+  hms: string,
+  opts: MergeTimeOptions | undefined
+): number {
+  const useElapsed =
+    opts?.semantics === 'elapsed_since_session_start' &&
+    opts.sessionEpochMs != null &&
+    Number.isFinite(opts.sessionEpochMs)
+  if (useElapsed) {
+    const d = parseDurationHmsToMs(hms)
+    if (d === null) return NaN
+    return opts!.sessionEpochMs! + d
+  }
+  return localMs(testDateYmd, hms)
+}
+
 /**
  * For each trail row, attach path loss from the nearest RF sample in time (same calendar day as `testDateYmd`).
  * Drops trail points with no RF sample within `maxDeltaMs`.
+ * When `timeOpts` indicates elapsed session timestamps, `sessionEpochMs` + duration (H:MM:SS) is used for both trail and RF rows.
  */
 export function mergeByNearestTime(
   testDateYmd: string,
   trail: WalkplotterTrailRow[],
   rf: PathLossRow[],
-  maxDeltaMs: number
+  maxDeltaMs: number,
+  timeOpts?: MergeTimeOptions
 ): MergedPlotPoint[] {
   if (!trail.length || !rf.length) return []
 
-  const rfMs = rf.map((r) => ({
-    t: localMs(testDateYmd, r.time),
-    pl: r.pathLoss,
-  }))
+  const rfMs = rf
+    .map((r) => ({
+      t: rowTimeMs(testDateYmd, r.time, timeOpts),
+      pl: r.pathLoss,
+    }))
+    .filter((x) => Number.isFinite(x.t))
+  if (!rfMs.length) return []
 
   const out: MergedPlotPoint[] = []
   for (const row of trail) {
-    const t = localMs(testDateYmd, row.timestamp)
+    const t = rowTimeMs(testDateYmd, row.timestamp, timeOpts)
+    if (!Number.isFinite(t)) continue
     let best = rfMs[0]!
     let bestD = Math.abs(t - best.t)
     for (let i = 1; i < rfMs.length; i++) {

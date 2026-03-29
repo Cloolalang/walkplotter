@@ -28,6 +28,17 @@ export function formatLocalTimeHMS(d: Date): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/** Elapsed duration as H+:MM:SS (for session t=0 exports; hours may exceed 23). */
+export function formatDurationMsAsHMS(ms: number): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  let sec = Math.max(0, Math.floor(ms / 1000))
+  const h = Math.floor(sec / 3600)
+  sec %= 3600
+  const m = Math.floor(sec / 60)
+  sec %= 60
+  return `${h}:${pad(m)}:${pad(sec)}`
+}
+
 function csvCell(v: string): string {
   if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`
   return v
@@ -45,6 +56,8 @@ export class TrailModel {
   private readonly commitStack: TrailPoint[][] = []
   private lastUser: UserAnchor | null = null
   private interpolationStepMs = 1000
+  /** Wall-clock epoch ms when user pressed “session t = 0”; CSV exports elapsed time from this instant. */
+  private sessionT0Ms: number | null = null
 
   /** Call when pausing: next user tap will not interpolate from the previous pin (jump elsewhere on the plan). */
   breakSegment(): void {
@@ -58,6 +71,23 @@ export class TrailModel {
   setInterpolationStepMs(ms: number): void {
     const v = Math.round(ms)
     this.interpolationStepMs = Math.min(INTERP_STEP_MAX, Math.max(INTERP_STEP_MIN, v))
+  }
+
+  /** Elapsed-time export from this instant (sync with hardware clocks). Trail should be empty or cleared first. */
+  setSessionTimeZero(at: Date): void {
+    this.sessionT0Ms = at.getTime()
+  }
+
+  clearSessionTimeZero(): void {
+    this.sessionT0Ms = null
+  }
+
+  getSessionTimeZeroMs(): number | null {
+    return this.sessionT0Ms
+  }
+
+  hasSessionTimeZero(): boolean {
+    return this.sessionT0Ms !== null
   }
 
   userTap(x: number, y: number, when: Date): void {
@@ -118,8 +148,12 @@ export class TrailModel {
       DEFAULT_GAP_THRESHOLD_MS
     )
     const now = new Date()
-    const testDateSource =
-      this.points.length > 0 ? new Date(this.points[0]!.t) : now
+    const useElapsed = this.sessionT0Ms !== null
+    const testDateSource = useElapsed
+      ? new Date(this.sessionT0Ms!)
+      : this.points.length > 0
+        ? new Date(this.points[0]!.t)
+        : now
     const lines: string[] = []
 
     lines.push(
@@ -131,8 +165,18 @@ export class TrailModel {
       `# test_date_local: ${formatLocalDateYMD(testDateSource)}`,
       `# export_date_local: ${formatLocalDateYMD(now)}`,
       `# export_time_local: ${formatLocalTimeHMS(now)}`,
-      `# coordinate_space: image_pixels_top_left`,
-      `# timestamp_format: HH:MM:SS local wall time (calendar date: test_date_local)`,
+      `# coordinate_space: image_pixels_top_left`
+    )
+    if (useElapsed) {
+      lines.push(
+        `# timestamp_semantics: elapsed_since_session_start`,
+        `# session_epoch_ms: ${this.sessionT0Ms}`,
+        `# timestamp_format: H:MM:SS elapsed since session t=0 (pair with path-loss log from same t=0)`
+      )
+    } else {
+      lines.push(`# timestamp_format: HH:MM:SS local wall time (calendar date: test_date_local)`)
+    }
+    lines.push(
       `# interpolation_gap_threshold_ms: ${meta.gapThresholdMs}`,
       `# interpolation_time_step_ms: ${meta.timeStepMs}`,
       `# interpolation_model: ${meta.model}`
@@ -141,11 +185,13 @@ export class TrailModel {
     lines.push(csvRow(['timestamp', 'x', 'y', 'source', 'new_segment']))
 
     for (const p of this.points) {
-      const d = new Date(p.t)
+      const ts = useElapsed
+        ? formatDurationMsAsHMS(p.t - this.sessionT0Ms!)
+        : formatLocalTimeHMS(new Date(p.t))
       const ns = p.segmentBreak ? '1' : '0'
       lines.push(
         csvRow([
-          formatLocalTimeHMS(d),
+          ts,
           String(Math.round(p.x * 1000) / 1000),
           String(Math.round(p.y * 1000) / 1000),
           p.source,

@@ -9,13 +9,19 @@ import {
 import {
   DEFAULT_MAX_MATCH_MS,
   extractWalkplotterTestDate,
+  extractWalkplotterTimestampInfo,
   mergeByNearestTime,
   parsePathLossCsv,
   parseWalkplotterEditable,
   serializeWalkplotterEditable,
 } from './processMerge'
-import type { EditableTrailRow, MergedPlotPoint, WalkplotterTrailRow } from './processMerge'
-import { buildPoiOnlyCsv, TrailModel } from './trail'
+import type {
+  EditableTrailRow,
+  MergeTimeOptions,
+  MergedPlotPoint,
+  WalkplotterTrailRow,
+} from './processMerge'
+import { buildPoiOnlyCsv, formatDurationMsAsHMS, formatLocalTimeHMS, TrailModel } from './trail'
 import type { ImageMeta } from './trail'
 import type { PoiMarker, TrailPoint } from './types'
 
@@ -295,6 +301,7 @@ function setImageFromFile(file: File | null): void {
     heightPx: 0,
   }
   trail.clear()
+  trail.clearSessionTimeZero()
   poiMarkers.length = 0
   recording = true
   setTab('map')
@@ -318,6 +325,7 @@ async function loadDefaultFloorPlan(): Promise<void> {
     heightPx: 0,
   }
   trail.clear()
+  trail.clearSessionTimeZero()
   poiMarkers.length = 0
   recording = true
   resetMapView()
@@ -485,6 +493,20 @@ app.innerHTML = `
     <div class="map-quick-bar" id="map-quick-bar" hidden>
       <button type="button" class="btn" id="btn-pause" disabled>Pause</button>
       <button type="button" class="btn" id="btn-undo" disabled>Undo trail</button>
+    </div>
+    <div class="map-session-bar" id="map-session-bar" hidden>
+      <button type="button" class="btn btn-session-t0" id="btn-session-t0" disabled title="Press when you zero tester and transponder clocks; CSV timestamps export as elapsed time (H:MM:SS) from this instant">
+        Session t = 0
+      </button>
+      <button type="button" class="btn" id="btn-session-t0-clear" hidden disabled title="Use local wall-clock times in CSV again">
+        Wall clock
+      </button>
+      <span class="map-session-badge" id="map-session-badge" hidden aria-live="polite"
+        >Timestamps: elapsed from session t&nbsp;= 0</span>
+      <div class="map-clock" id="map-clock">
+        <span class="map-clock-label" id="map-clock-label">Local time</span>
+        <span class="map-clock-value" id="map-clock-value" aria-live="polite">--:--:--</span>
+      </div>
     </div>
     <div class="stage-wrap">
       <div class="stage" id="stage">
@@ -766,6 +788,12 @@ const placeholder = document.querySelector<HTMLParagraphElement>('#placeholder')
 const stage = document.querySelector<HTMLDivElement>('#stage')!
 const stageInner = document.querySelector<HTMLDivElement>('#stage-inner')!
 const mapQuickBar = document.querySelector<HTMLDivElement>('#map-quick-bar')!
+const mapSessionBar = document.querySelector<HTMLDivElement>('#map-session-bar')!
+const btnSessionT0 = document.querySelector<HTMLButtonElement>('#btn-session-t0')!
+const btnSessionT0Clear = document.querySelector<HTMLButtonElement>('#btn-session-t0-clear')!
+const mapSessionBadge = document.querySelector<HTMLSpanElement>('#map-session-badge')!
+const mapClockLabel = document.querySelector<HTMLSpanElement>('#map-clock-label')!
+const mapClockValue = document.querySelector<HTMLSpanElement>('#map-clock-value')!
 const mapZoomBar = document.querySelector<HTMLDivElement>('#map-zoom-bar')!
 const pinSizeBar = document.querySelector<HTMLDivElement>('#pin-size-bar')!
 const pinSizeRange = document.querySelector<HTMLInputElement>('#pin-size')!
@@ -1838,6 +1866,18 @@ function readFileAsText(f: File): Promise<string> {
   })
 }
 
+/** Process merge: use elapsed t=0 semantics from loaded Walkplotter CSV preamble. */
+function mergeTimeOptsFromPreamble(): MergeTimeOptions | undefined {
+  if (!processWalkPreamble) return undefined
+  const info = extractWalkplotterTimestampInfo(processWalkPreamble)
+  if (info.semantics !== 'elapsed_since_session_start') return undefined
+  if (info.sessionEpochMs == null || !Number.isFinite(info.sessionEpochMs)) return undefined
+  return {
+    semantics: 'elapsed_since_session_start',
+    sessionEpochMs: info.sessionEpochMs,
+  }
+}
+
 function runProcessPlot(): void {
   const walkFile = processFileWalk.files?.[0]
   const plFile = processFilePl.files?.[0]
@@ -1881,7 +1921,13 @@ function runProcessPlot(): void {
         return
       }
       const trailForMerge: WalkplotterTrailRow[] = processTrailEditable
-      const merged = mergeByNearestTime(testDate, trailForMerge, plRows, DEFAULT_MAX_MATCH_MS)
+      const merged = mergeByNearestTime(
+        testDate,
+        trailForMerge,
+        plRows,
+        DEFAULT_MAX_MATCH_MS,
+        mergeTimeOptsFromPreamble()
+      )
       if (!merged.length) {
         processMergedPoints = []
         processMergedPointsRaw = []
@@ -1934,6 +1980,46 @@ function commitInterpStepFromInput(): void {
   syncInterpControl()
 }
 
+function updateSessionT0Chrome(): void {
+  const hasMap = Boolean(img.naturalWidth)
+  const on = trail.hasSessionTimeZero()
+  const trailMode = placementMode === 'trail'
+  btnSessionT0.disabled = !hasMap || !trailMode
+  btnSessionT0.hidden = on
+  btnSessionT0Clear.hidden = !on
+  btnSessionT0Clear.disabled = !hasMap
+  mapSessionBadge.hidden = !on
+}
+
+let mapClockInterval: ReturnType<typeof setInterval> | null = null
+
+function updateMapClock(): void {
+  if (!img.naturalWidth) return
+  const t0 = trail.getSessionTimeZeroMs()
+  if (t0 != null) {
+    mapClockLabel.textContent = 'Elapsed'
+    mapClockValue.textContent = formatDurationMsAsHMS(Date.now() - t0)
+  } else {
+    mapClockLabel.textContent = 'Local time'
+    mapClockValue.textContent = formatLocalTimeHMS(new Date())
+  }
+}
+
+function syncMapClock(): void {
+  if (!img.naturalWidth) {
+    if (mapClockInterval != null) {
+      clearInterval(mapClockInterval)
+      mapClockInterval = null
+    }
+    mapClockValue.textContent = '--:--:--'
+    return
+  }
+  updateMapClock()
+  if (mapClockInterval == null) {
+    mapClockInterval = setInterval(updateMapClock, 1000)
+  }
+}
+
 function setTab(which: 'map' | 'controls' | 'process'): void {
   const mapActive = which === 'map'
   const controlsActive = which === 'controls'
@@ -1961,6 +2047,7 @@ function updateChrome(): void {
   const hasPoi = poiMarkers.length > 0
   placeholder.hidden = hasMap
   mapQuickBar.hidden = !hasMap
+  mapSessionBar.hidden = !hasMap
   mapZoomBar.hidden = !hasMap
   pinSizeBar.hidden = !hasMap
   stage.classList.toggle('has-image', hasMap)
@@ -2011,6 +2098,8 @@ function updateChrome(): void {
       'Recording paused — Resume to continue the trail, switch to POI to add markers, or Stop & save… to export (POI-only is OK).'
     hintMap.textContent = 'Trail paused — Resume, change mode, or Stop & save…'
   }
+  updateSessionT0Chrome()
+  syncMapClock()
 }
 
 function openSaveDialog(): void {
@@ -2238,10 +2327,20 @@ processFileWalk.addEventListener('change', () => {
       processTrailOriginal = parsed.trail.map((r) => ({ ...r }))
       processWalkTestDate = extractWalkplotterTestDate(text)
       processMergedPoints = []
+      const tsInfo = extractWalkplotterTimestampInfo(text)
+      let tsNote = ''
+      if (tsInfo.semantics === 'elapsed_since_session_start') {
+        if (tsInfo.sessionEpochMs == null) {
+          tsNote =
+            ' Warning: elapsed timestamps but missing # session_epoch_ms — time alignment may be wrong.'
+        } else {
+          tsNote = ' Timestamps: elapsed from session t=0 (match path-loss log to same t=0).'
+        }
+      }
       if (!processWalkTestDate) {
-        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Add # test_date_local: YYYY-MM-DD for Plot path loss.`
+        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Add # test_date_local: YYYY-MM-DD for Plot path loss.${tsNote}`
       } else {
-        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Nudge and save if needed, then choose path loss CSV and Plot path loss.`
+        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Nudge and save if needed, then choose path loss CSV and Plot path loss.${tsNote}`
       }
       drawProcessOverlay()
     } catch (e) {
@@ -2716,6 +2815,30 @@ btnClear.addEventListener('click', () => {
   if (!trail.points.length) return
   if (!confirm('Clear all pins on this floor plan?')) return
   trail.clear()
+  redraw()
+  updateChrome()
+})
+
+btnSessionT0.addEventListener('click', () => {
+  if (!img.naturalWidth || placementMode !== 'trail') return
+  if (trail.points.length > 0) {
+    if (
+      !confirm(
+        'Clear the current trail and start session t = 0 now? Press when your tester and transponder clocks are zeroed together.'
+      )
+    ) {
+      return
+    }
+    trail.clear()
+  }
+  trail.setSessionTimeZero(new Date())
+  redraw()
+  updateChrome()
+})
+
+btnSessionT0Clear.addEventListener('click', () => {
+  if (!img.naturalWidth) return
+  trail.clearSessionTimeZero()
   redraw()
   updateChrome()
 })

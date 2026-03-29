@@ -164,6 +164,56 @@ body {
   flex-shrink: 0;
 }
 
+.map-session-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 8px 10px;
+  margin-top: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(46, 230, 166, 0.22);
+  background: rgba(46, 230, 166, 0.06);
+  flex-shrink: 0;
+}
+
+.btn-session-t0 {
+  font-weight: 700;
+  border-color: rgba(46, 230, 166, 0.45);
+}
+
+.map-session-badge {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(46, 230, 166, 0.12);
+  border: 1px solid rgba(46, 230, 166, 0.35);
+}
+
+.map-clock {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.map-clock-label {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  color: var(--text-muted, rgba(255, 255, 255, 0.72));
+}
+
+.map-clock-value {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .interp-bar {
   display: flex;
   flex-direction: column;
