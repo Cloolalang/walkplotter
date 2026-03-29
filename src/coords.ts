@@ -49,6 +49,26 @@ type OutsideReason =
   | { ok: false; reason: 'no_intrinsic_size' | 'zero_box' | 'outside_drawn_image' }
 
 /**
+ * Maps a viewport point into an element’s **layout** CSS pixel space (`offsetWidth`/`offsetHeight`),
+ * consistent with drawing and with `imagePixelToElementLocal` when the element is inside a transformed
+ * ancestor (e.g. pan/zoom on a parent).
+ */
+export function clientToElementLocal(
+  clientX: number,
+  clientY: number,
+  el: HTMLElement
+): { x: number; y: number } | null {
+  const rect = el.getBoundingClientRect()
+  const lw = el.offsetWidth
+  const lh = el.offsetHeight
+  if (rect.width <= 0 || rect.height <= 0 || lw <= 0 || lh <= 0) return null
+  return {
+    x: ((clientX - rect.left) * lw) / rect.width,
+    y: ((clientY - rect.top) * lh) / rect.height,
+  }
+}
+
+/**
  * Maps intrinsic image pixels to coordinates in the element's **layout** box
  * (same space as the overlay canvas placed with offsetLeft/offsetTop/offsetWidth).
  */

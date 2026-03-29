@@ -2,7 +2,7 @@
 
 A small **offline-friendly** web app for walking a path on a floor plan: drop **trail** pins with timestamps, add **points of interest markers (POI markers)**—labeled pins not on the trail—pinch-zoom and pan, then export **CSV** (and optional map snapshot **JPG**). Built with **Vite** and **TypeScript**; runs in the browser with no backend.
 
-**Typical use case:** **uplink signal coverage walk testing** alongside [**dBm-Now**](https://github.com/Cloolalang/dBm-Now-), an ESP-NOW path-loss / RSSI project. You walk the indoor coverage area with a **signal source** while Walkplotter records your **route on a floor plan** with timestamps; a **transponder** elsewhere receives the signal and logs **levels with timestamps** (for example via Serial CSV). **Post-processing the two timestamped CSV files** lets you align path and measurements to build **uplink coverage plots** for **in-building DAS** commissioning and design. As of **version 2.0**, the in-browser **Process** tab can load your Walkplotter export and path-loss log, match them by time, and **plot path loss on the floor plan** (plus a histogram and optional numeric labels)—no spreadsheet required for a first look.
+**Typical use case:** **uplink signal coverage walk testing** alongside [**dBm-Now**](https://github.com/Cloolalang/dBm-Now-), an ESP-NOW path-loss / RSSI project. You walk the indoor coverage area with a **signal source** while Walkplotter records your **route on a floor plan** with timestamps; a **transponder** elsewhere receives the signal and logs **levels with timestamps** (for example via Serial CSV). **Post-processing the two timestamped CSV files** lets you align path and measurements to build **uplink coverage plots** for **in-building DAS** commissioning and design. As of **version 2.0**, the in-browser **Process** tab loads your Walkplotter export and path-loss log, matches them by time, and draws **path-loss–colored** markers and optional **histogram**, **point labels**, thin **route** line, and a **color-coded trail** (continuous ribbon the same width as the markers)—no spreadsheet required for a first look.
 
 ![Walkplotter on a floor plan: trail pins with path, POI markers, and the Map / Controls UI](example.jpg)
 
@@ -15,7 +15,7 @@ A small **offline-friendly** web app for walking a path on a floor plan: drop **
 - **POI** mode for separate labeled pins (anything you want to mark on the map without a timestamp); optional second CSV export (pixels only, no timestamps).
 - **Map** / **Controls** / **Process** tabs: large map, tools and export, and **post-processing** (path loss on the floor plan).
 - Pin size, crosshairs, pause/resume, undo, CSV download.
-- **Process** tab: load floor plan + Walkplotter CSV + path-loss CSV; join by nearest time; fixed **−30…−100 dBm** color scale, **20 dB histogram**, optional **point labels**.
+- **Process** tab: **zoom and pan** (View bar, wheel, drag; with **Nudge trail**, **left-drag** on empty space, **middle-drag**, or **Alt + drag** to pan); **nudge trail** pixels and **save** CSV; **Plot path loss** with fixed **−30…−100 dBm** scale, **20 dB histogram**, optional **Point labels**, **Show route** (thin polyline), and **Color-coded trail** (continuous stroke with per-segment gradient; **with 2+ plotted points** hides the circular markers so only the ribbon shows). **Original** walk samples (**user**) use a **grey ring**; **interpolated** samples have **no ring**—in **trail preview** and on the path-loss overlay when markers are visible (fill color encodes dBm).
 
 ---
 
@@ -47,7 +47,7 @@ Run the dev server (`npm run dev`) and open the URL shown in the terminal, or se
 
 ### Map navigation and appearance
 
-- **Pinch** to zoom, **drag** with one finger to pan. Under Controls, use **Map** − / + and **Reset view** if you prefer buttons.
+- **Pinch** to zoom, **drag** with one finger to pan. On a **desktop**, **mouse wheel** zooms and **drag** pans the map. Under Controls, use **Map** − / + and **Reset view** if you prefer buttons.
 - **Pin size** scales trail pins, the trail line, and POI markers on screen (export coordinates are unchanged).
 
 ### Exporting data
@@ -67,25 +67,36 @@ Run the dev server (`npm run dev`) and open the URL shown in the terminal, or se
 
 Use this after you have a **Walkplotter trail CSV** (from **Download CSV** or **Stop & save…**) and a separate **path-loss log** as CSV from your receiver/tooling (e.g. Serial export). All processing stays in the browser.
 
-1. Open the **Process** tab.
-2. Choose three files:
-   - **Floor plan** — the **same** image you used for the walk (trail `x,y` pixels refer to this image).
-   - **Walkplotter CSV** — your exported file; it must include the header line `# test_date_local: YYYY-MM-DD` so times can be aligned to a calendar day.
-   - **Path loss CSV** — comma-separated rows: **column 1** = time of day as `HH:MM:SS` (same local day as `test_date_local`), **column 4** = path loss value (dBm). Lines starting with `#` are ignored.
-3. Tap **Plot path loss**. The app matches **each trail sample** to the **nearest** path-loss row in time (same date). A match is kept only if the time difference is **at most 3 seconds**; otherwise that trail point is skipped. If nothing matches, check clocks, date, and CSV formats.
-4. **Map**: each matched point is drawn on the plan at the trail coordinates, colored by path loss on a fixed scale from **−30 dBm** (best, light blue) through greens/yellows/oranges/reds toward **−70 dBm**, then **greys** for **−90 dBm** and below, down to **−100 dBm** (values outside that range are **clamped** for color only).
-5. **Histogram** — a table appears under the legend: **20 dB bins**, counts, and percentages for the current plotted set (bins follow the min/max of your data).
-6. **Point labels** — optional checkbox: show **dBm** next to each dot (helpful for screenshots; crowded if many points overlap).
+For **best usability**, do the **Process** tab work on a **PC with a mouse** (wheel zoom, pan, and nudge trail are tuned for that). A phone or touchscreen still works, but desktop is more comfortable for zooming, panning, and dragging trail points.
 
-Selected file **names** are listed under the buttons so you can confirm what is loaded.
+**Process floor plan view:** After you load a floor plan, use the **View** bar (− / + / **Reset view**) or the **mouse wheel** over the plan to zoom; **drag** on empty space to **pan**. With **Nudge trail** on, **left-drag** on empty space (not on a trail dot) pans the view like the middle button; **middle-drag** or **Alt + drag** still work anywhere on the overlay. Touch devices can use **pinch** to zoom and two-finger gestures where supported.
+
+**Original vs interpolated trail points:** The Walkplotter CSV marks each row with a **source** (`user` = your taps, `interpolated` = synthetic points along straight segments). On the Process map, **original** points show a **grey ring** around the dot; **interpolated** points have **no ring** (green trail before **Plot path loss**). After **Plot path loss**, the same ring convention applies when **disks** are drawn; turning **Color-coded trail** on with **two or more** points hides disks and shows only the ribbon. Fill color always encodes **dBm** where markers or the ribbon are shown. A **legend** lists original vs interpolated counts when relevant.
+
+1. Open the **Process** tab.
+2. Choose **Floor plan** (the **same** image as the walk) and **Walkplotter CSV**. The trail appears as green dots (and a line); **original** vs **interpolated** samples match the **grey ring** / **no ring** rule above. The CSV should include `# test_date_local: YYYY-MM-DD` for time alignment when you plot path loss.
+3. **Optional — straighten the trail:** turn on **Nudge trail**, then **drag** dots to adjust **image pixel** `x,y` in memory (nudge works at any zoom level). **Snap angles** can lock segments to **90°** (horizontal/vertical) or **45°** (8-way): from the **previous** point only at the **start** of the trail, from the **next** point only at the **end**, and using **both** neighbors for **middle** points (intersection of snapped incoming and outgoing directions). Use **Reset trail** to reload pixels from the file you chose. When satisfied, use **Save as edited copy** (`…-edited.csv`) or **Save (original name)** so the browser’s save dialog can replace the loaded file if you choose the same path. **Plot path loss** always uses the trail **currently in memory** (including unsaved nudges).
+4. Choose **Path loss CSV** — comma-separated rows: **column 1** = `HH:MM:SS`, **column 4** = path loss (dBm). Lines starting with `#` are ignored.
+5. Tap **Plot path loss**. Each trail sample is matched to the **nearest** path-loss row in time (same date), within **3 seconds** or the point is skipped.
+6. **Map (after plotting):** Each matched sample is placed at trail coordinates. **Default:** path-loss–colored **circles** (same palette: **−30 dBm** light blue through warm/cool tones toward **−70 dBm**, **greys** toward **−100 dBm**; out-of-range values **clamped** for color). **Original** samples: **grey ring**; **interpolated**: **no ring** (legend summarizes counts). Optional toggles (toolbar):
+   - **Point labels** — dBm text next to each sample (offset adjusts if markers are hidden).
+   - **Show route** — thin semi-transparent polyline along consecutive plotted points in walk order.
+   - **Color-coded trail** — continuous stroke **along the same path**, **line width = circle diameter**, each segment a **linear gradient** between the two endpoints’ path-loss colors. With **two or more** points, **markers and rings are hidden** so only the ribbon is drawn; with **one** point, the disk is still shown (no segment to form a ribbon).
+   - **Histogram** (20 dB bins) summarizes the plotted path-loss set.
+7. **Clear path loss plot** removes the overlay and histogram so you can **nudge the trail** again; it does not reload the CSV files.
+
+Selected file **names** are listed under the buttons so you can confirm what is loaded. Changing the **floor plan** clears the Walkplotter and path-loss selections so coordinates stay consistent.
 
 **Summary:** maximum tolerated **timestamp offset** between a trail row and the path-loss row used for it is **3 seconds** (nearest-neighbor within that window).
+
+**How path loss values are chosen:** Walkplotter does **not** linearly interpolate dBm **between** receiver measurements. For each trail row (including interpolated trail points), it uses the **dBm from the single nearest** path-loss row in time, as long as that row is within **3 seconds**. So the plotted color always reflects an **actual** value from your log, not a blend of two samples. In practice you might log RF at a **fixed interval** (for example **one sample per second / 1000 ms**); that cadence is **your choice**—the app does not assume a particular spacing, only that timestamps align with `# test_date_local` and fall inside the 3 s match window.
 
 ### Tips
 
 - **Undo trail** / **Clear trail** affect only the walked path; POIs are separate.
 - After **Pause**, you can still use **Stop & save…** or **Download CSV** so you do not need trail pins to finish a POI-only session.
 - All coordinates are stored in **image pixel** space (origin top-left), matching the floor plan file.
+- **Process:** Use **Clear path loss plot** to remove the overlay and histogram and **nudge** the trail again (CSV files stay selected; reload the walk file if you need a fresh copy). Combine **Show route** with or without **Color-coded trail** depending on whether you want a thin reference line under or beside the ribbon.
 
 ---
 

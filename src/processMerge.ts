@@ -9,6 +9,11 @@ export type WalkplotterTrailRow = {
   source: string
 }
 
+/** Trail row including `new_segment` for round-trip CSV edit/save. */
+export type EditableTrailRow = WalkplotterTrailRow & {
+  newSegment: string
+}
+
 export type PathLossRow = {
   time: string
   pathLoss: number
@@ -18,6 +23,8 @@ export type MergedPlotPoint = {
   x: number
   y: number
   pathLoss: number
+  /** Walkplotter trail `source` column (e.g. `user` vs `interpolated`). */
+  source: string
 }
 
 const DATE_RE = /^#\s*test_date_local:\s*(\d{4}-\d{2}-\d{2})\s*$/i
@@ -102,6 +109,92 @@ export function parseWalkplotterTrailRows(text: string): WalkplotterTrailRow[] {
   return rows
 }
 
+const TRAIL_HEADER_RE = /^timestamp\s*,/i
+
+function csvCell(v: string): string {
+  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`
+  return v
+}
+
+function csvRowFromCells(cells: string[]): string {
+  return cells.map(csvCell).join(',')
+}
+
+/**
+ * Split a Walkplotter export into preamble (headers + column title line), editable trail rows, and tail (POI section etc.).
+ */
+export function parseWalkplotterEditable(text: string): {
+  preamble: string
+  trail: EditableTrailRow[]
+  tail: string
+} | null {
+  const normalized = text.replace(/^\uFEFF/, '')
+  const lines = normalized.split(/\r?\n/)
+  let headerIdx = -1
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i]!.trim()
+    if (TRAIL_HEADER_RE.test(t)) {
+      headerIdx = i
+      break
+    }
+  }
+  if (headerIdx < 0) return null
+
+  const preamble = lines.slice(0, headerIdx + 1).join('\r\n')
+  const trail: EditableTrailRow[] = []
+  let tailStart = lines.length
+
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const raw = lines[i]!
+    const line = raw.trim()
+    if (!line) continue
+    if (POI_SECTION.test(line)) {
+      tailStart = i
+      break
+    }
+    if (line.startsWith('#')) continue
+    const cells = parseCsvLine(line)
+    if (cells.length < 4) continue
+    const ts = cells[0]!.trim()
+    if (ts === 'timestamp') continue
+    const x = Number(cells[1])
+    const y = Number(cells[2])
+    const source = (cells[3] ?? 'user').trim()
+    const newSegment = (cells[4] ?? '0').trim()
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    if (!/^\d{1,2}:\d{2}:\d{2}$/.test(ts)) continue
+    trail.push({ timestamp: ts, x, y, source, newSegment })
+  }
+
+  const tail = tailStart < lines.length ? lines.slice(tailStart).join('\r\n') : ''
+  return { preamble, trail, tail }
+}
+
+/** Rebuild Walkplotter CSV with updated pixel columns; POI tail preserved. */
+export function serializeWalkplotterEditable(
+  preamble: string,
+  trail: EditableTrailRow[],
+  tail: string
+): string {
+  const body = trail.map((r) =>
+    csvRowFromCells([
+      r.timestamp,
+      String(Math.round(r.x * 1000) / 1000),
+      String(Math.round(r.y * 1000) / 1000),
+      r.source,
+      r.newSegment,
+    ])
+  )
+  const parts: string[] = [preamble]
+  if (body.length > 0) {
+    parts.push(body.join('\r\n'))
+  }
+  if (tail.length > 0) {
+    parts.push(tail)
+  }
+  return '\uFEFF' + parts.join('\r\n') + '\r\n'
+}
+
 /**
  * Comma-separated; 4th field (index 3) is path loss. First field is HH:MM:SS.
  */
@@ -161,7 +254,7 @@ export function mergeByNearestTime(
       }
     }
     if (bestD <= maxDeltaMs) {
-      out.push({ x: row.x, y: row.y, pathLoss: best.pl })
+      out.push({ x: row.x, y: row.y, pathLoss: best.pl, source: row.source })
     }
   }
   return out

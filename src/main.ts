@@ -1,13 +1,14 @@
 import './style.css'
-import { clientToImagePixel, imagePixelToElementLocal } from './coords'
+import { clientToElementLocal, clientToImagePixel, imagePixelToElementLocal } from './coords'
 import {
   DEFAULT_MAX_MATCH_MS,
   extractWalkplotterTestDate,
   mergeByNearestTime,
   parsePathLossCsv,
-  parseWalkplotterTrailRows,
+  parseWalkplotterEditable,
+  serializeWalkplotterEditable,
 } from './processMerge'
-import type { MergedPlotPoint } from './processMerge'
+import type { EditableTrailRow, MergedPlotPoint, WalkplotterTrailRow } from './processMerge'
 import { buildPoiOnlyCsv, TrailModel } from './trail'
 import type { ImageMeta } from './trail'
 import type { PoiMarker, TrailPoint } from './types'
@@ -35,11 +36,22 @@ let pendingPoi: { x: number; y: number } | null = null
 
 let processPlanObjectUrl: string | null = null
 let processMergedPoints: MergedPlotPoint[] = []
+/** Walkplotter trail loaded in Process tab; x/y edits are saved via Save Walkplotter CSV. */
+let processWalkPreamble = ''
+let processWalkTail = ''
+let processTrailEditable: EditableTrailRow[] = []
+let processTrailOriginal: EditableTrailRow[] = []
+let processWalkTestDate: string | null = null
+let processTrailDragIndex: number | null = null
 
 /** Pan (px) and scale for the floor plan; CSS transform on #stage-inner. */
 let mapPanX = 0
 let mapPanY = 0
 let mapZoom = 1
+/** Process tab floor plan view; CSS transform on #process-stage-inner. */
+let processPanX = 0
+let processPanY = 0
+let processZoom = 1
 const MAP_ZOOM_MIN = 0.35
 const MAP_ZOOM_MAX = 8
 const PIN_DOT_SCALE_MIN = 0.25
@@ -67,6 +79,17 @@ let panStartMapY = 0
 let pinchStartDist = 0
 let pinchStartZoom = 1
 let hadMultiTouch = false
+
+const processPointerPositions = new Map<number, { clientX: number; clientY: number }>()
+let processGestureKind: 'idle' | 'pan-pending' | 'pan' | 'pinch' = 'idle'
+let processPanStartClientX = 0
+let processPanStartClientY = 0
+let processPanStartPanX = 0
+let processPanStartPanY = 0
+let processPinchStartDist = 0
+let processPinchStartZoom = 1
+let processPanPointerId = -1
+let processPanSlopPx = TAP_MAX_MOVE_MOUSE_PX
 
 function $(sel: string): HTMLElement {
   const el = document.querySelector(sel)
@@ -546,8 +569,8 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--process" id="panel-process" role="tabpanel" aria-labelledby="tab-process" hidden>
     <p class="hint process-hint">
-      Load the same <strong>floor plan</strong> as your walk, your <strong>Walkplotter CSV</strong> export, and a <strong>path loss</strong> log (comma-separated; 4th field = path loss, 1st = HH:MM:SS). Points are matched by nearest time (within
-      ${DEFAULT_MAX_MATCH_MS / 1000}s) using <code>test_date_local</code> from the Walkplotter file.
+      Load the <strong>floor plan</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss, 1st = HH:MM:SS) and <strong>Plot path loss</strong>. Nearest-time match within
+      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>.
     </p>
     <div class="process-toolbar">
       <label class="btn btn-primary process-file-btn">
@@ -562,11 +585,45 @@ app.innerHTML = `
         Path loss CSV
         <input id="process-file-pl" type="file" accept=".csv,text/csv,text/plain,*/*" hidden />
       </label>
-      <button type="button" class="btn btn-primary process-btn-run" id="process-btn-plot" title="Merge CSVs and draw path loss on the floor plan">Plot path loss</button>
+      <button type="button" class="btn btn-primary process-btn-run" id="process-btn-plot" title="Merge path loss log with current trail and draw">Plot path loss</button>
+      <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss overlay to edit the trail again">
+        Clear path loss plot
+      </button>
       <label class="toolbar-toggle process-toolbar-toggle" title="Show path loss (dBm) next to each point">
         <input type="checkbox" id="process-show-pl-labels" />
         Point labels
       </label>
+      <label class="toolbar-toggle process-toolbar-toggle" title="Draw lines between plotted points in walk order (matched samples only)">
+        <input type="checkbox" id="process-show-pl-route" />
+        Show route
+      </label>
+      <label class="toolbar-toggle process-toolbar-toggle" title="Continuous path-loss–colored ribbon (same width as points); hides plot disks while on (2+ points). Segment blends between samples.">
+        <input type="checkbox" id="process-show-pl-colored-trail" />
+        Color-coded trail
+      </label>
+    </div>
+    <div class="process-toolbar process-toolbar--adjust">
+      <label class="toolbar-toggle process-toolbar-toggle" title="Drag trail dots to adjust image pixel coordinates; use Save when ready">
+        <input type="checkbox" id="process-nudge-trail" disabled />
+        Nudge trail
+      </label>
+      <label class="process-snap-wrap" for="process-nudge-snap">
+        <span class="process-snap-label">Snap angles</span>
+        <select id="process-nudge-snap" class="process-nudge-snap" disabled title="While dragging: snap using the segment from the previous point, from the next point, or both (middle points)">
+          <option value="off">Off</option>
+          <option value="90">90° H/V</option>
+          <option value="45">45° 8-way</option>
+        </select>
+      </label>
+      <button type="button" class="btn" id="process-reset-trail" disabled title="Restore trail pixels from when the CSV was loaded">
+        Reset trail
+      </button>
+      <button type="button" class="btn btn-primary" id="process-save-walk-edited" disabled title="Download as a new file (name-edited.csv)">
+        Save as edited copy
+      </button>
+      <button type="button" class="btn" id="process-save-walk-original" disabled title="Download using the loaded file’s name—choose the same folder in the save dialog to replace it">
+        Save (original name)
+      </button>
     </div>
     <div class="process-files-summary" id="process-files-summary" aria-live="polite">
       <div class="process-file-row">
@@ -582,7 +639,7 @@ app.innerHTML = `
         <span class="process-file-name" id="process-filename-pl">—</span>
       </div>
     </div>
-    <p class="hint process-status" id="process-status">Choose files, then tap Plot path loss.</p>
+    <p class="hint process-status" id="process-status">Load floor plan and Walkplotter CSV to begin.</p>
     <div class="process-legend" id="process-legend" hidden></div>
     <div class="process-histogram-wrap" id="process-histogram-wrap" hidden>
       <p class="process-histogram-title">Path loss histogram (20 dB bins)</p>
@@ -599,10 +656,22 @@ app.innerHTML = `
         </table>
       </div>
     </div>
+    <div class="map-zoom-bar process-zoom-bar" id="process-zoom-bar" hidden>
+      <span>View</span>
+      <button type="button" class="btn" id="process-btn-zoom-out" title="Zoom out">−</button>
+      <span class="zoom-pct" id="process-zoom-pct">100%</span>
+      <button type="button" class="btn" id="process-btn-zoom-in" title="Zoom in">+</button>
+      <button type="button" class="btn" id="process-btn-zoom-reset" title="Reset pan and zoom">Reset view</button>
+    </div>
+    <p class="hint process-mouse-hint" id="process-mouse-hint" hidden>
+      Mouse: wheel to zoom · drag empty area to pan · while nudging: <strong>left-drag</strong> on empty space, or <strong>middle-drag</strong> / <strong>Alt+drag</strong> anywhere, to pan the view.
+    </p>
     <div class="process-stage-wrap">
       <div class="process-stage" id="process-stage">
-        <img id="process-plan" alt="Floor plan for processing" />
-        <canvas id="process-overlay" />
+        <div class="process-stage-inner" id="process-stage-inner">
+          <img id="process-plan" alt="Floor plan for processing" />
+          <canvas id="process-overlay" />
+        </div>
       </div>
       <p class="empty process-placeholder" id="process-placeholder">Load a floor plan image to see the overlay.</p>
     </div>
@@ -690,11 +759,25 @@ const panelProcess = document.querySelector<HTMLDivElement>('#panel-process')!
 const processImg = document.querySelector<HTMLImageElement>('#process-plan')!
 const processCanvas = document.querySelector<HTMLCanvasElement>('#process-overlay')!
 const processStage = document.querySelector<HTMLDivElement>('#process-stage')!
+const processStageInner = document.querySelector<HTMLDivElement>('#process-stage-inner')!
+const processZoomBar = document.querySelector<HTMLDivElement>('#process-zoom-bar')!
+const processZoomPctEl = document.querySelector<HTMLSpanElement>('#process-zoom-pct')!
+const processBtnZoomIn = document.querySelector<HTMLButtonElement>('#process-btn-zoom-in')!
+const processBtnZoomOut = document.querySelector<HTMLButtonElement>('#process-btn-zoom-out')!
+const processBtnZoomReset = document.querySelector<HTMLButtonElement>('#process-btn-zoom-reset')!
 const processFilePlan = document.querySelector<HTMLInputElement>('#process-file-plan')!
 const processFileWalk = document.querySelector<HTMLInputElement>('#process-file-walk')!
 const processFilePl = document.querySelector<HTMLInputElement>('#process-file-pl')!
 const processBtnPlot = document.querySelector<HTMLButtonElement>('#process-btn-plot')!
+const processBtnClearPlot = document.querySelector<HTMLButtonElement>('#process-btn-clear-plot')!
 const processShowPlLabels = document.querySelector<HTMLInputElement>('#process-show-pl-labels')!
+const processShowPlRoute = document.querySelector<HTMLInputElement>('#process-show-pl-route')!
+const processShowPlColoredTrail = document.querySelector<HTMLInputElement>('#process-show-pl-colored-trail')!
+const processNudgeTrail = document.querySelector<HTMLInputElement>('#process-nudge-trail')!
+const processNudgeSnap = document.querySelector<HTMLSelectElement>('#process-nudge-snap')!
+const processResetTrail = document.querySelector<HTMLButtonElement>('#process-reset-trail')!
+const processSaveWalkEdited = document.querySelector<HTMLButtonElement>('#process-save-walk-edited')!
+const processSaveWalkOriginal = document.querySelector<HTMLButtonElement>('#process-save-walk-original')!
 const processStatus = document.querySelector<HTMLParagraphElement>('#process-status')!
 const processFilenamePlan = document.querySelector<HTMLSpanElement>('#process-filename-plan')!
 const processFilenameWalk = document.querySelector<HTMLSpanElement>('#process-filename-walk')!
@@ -703,6 +786,7 @@ const processLegend = document.querySelector<HTMLDivElement>('#process-legend')!
 const processHistogramWrap = document.querySelector<HTMLDivElement>('#process-histogram-wrap')!
 const processHistogramBody = document.querySelector<HTMLTableSectionElement>('#process-histogram-body')!
 const processPlaceholder = document.querySelector<HTMLParagraphElement>('#process-placeholder')!
+const processMouseHint = document.querySelector<HTMLParagraphElement>('#process-mouse-hint')!
 const saveDialog = document.querySelector<HTMLDialogElement>('#save-dialog')!
 const saveForm = document.querySelector<HTMLFormElement>('#save-form')!
 const saveDialogDesc = document.querySelector<HTMLParagraphElement>('#save-dialog-desc')!
@@ -873,6 +957,88 @@ function resetMapView(): void {
   updateZoomPctLabel()
 }
 
+function applyProcessViewTransform(): void {
+  processStageInner.style.setProperty('--process-pan-x', `${processPanX}px`)
+  processStageInner.style.setProperty('--process-pan-y', `${processPanY}px`)
+  processStageInner.style.setProperty('--process-zoom', String(processZoom))
+}
+
+function zoomAroundProcessPoint(zNew: number, fx: number, fy: number, zOld: number): void {
+  const baseX = processStageInner.offsetLeft
+  const baseY = processStageInner.offsetTop
+  if (zOld <= 0 || !Number.isFinite(zOld)) {
+    processZoom = zNew
+    return
+  }
+  const ratio = zNew / zOld
+  if (!Number.isFinite(ratio)) {
+    processZoom = zNew
+    return
+  }
+  processPanX += (fx - baseX) * (1 - ratio)
+  processPanY += (fy - baseY) * (1 - ratio)
+  processZoom = zNew
+}
+
+function applyProcessZoomFactor(factor: number): void {
+  const rect = processStage.getBoundingClientRect()
+  const fx = rect.width / 2
+  const fy = rect.height / 2
+  const zOld = processZoom
+  const zNew = clampMapZoom(processZoom * factor)
+  zoomAroundProcessPoint(zNew, fx, fy, zOld)
+  applyProcessViewTransform()
+  updateProcessZoomPctLabel()
+  drawProcessOverlay()
+}
+
+function updateProcessZoomPctLabel(): void {
+  processZoomPctEl.textContent = `${Math.round(processZoom * 100)}%`
+}
+
+function resetProcessView(): void {
+  processPanX = 0
+  processPanY = 0
+  processZoom = 1
+  applyProcessViewTransform()
+  updateProcessZoomPctLabel()
+}
+
+function processCanvasBlocksStageGestures(): boolean {
+  return getComputedStyle(processCanvas).pointerEvents === 'auto'
+}
+
+/**
+ * Desktop: immediate pan (no slop) — middle button, Alt+left, or **left on empty overlay**
+ * while nudging (same as middle; left on a trail dot still nudges).
+ */
+function processMouseViewPanAllowed(e: PointerEvent): boolean {
+  if (e.pointerType !== 'mouse') return false
+  if (e.button === 1) return true
+  if (e.button === 0 && e.altKey) return true
+  if (
+    e.button === 0 &&
+    !e.altKey &&
+    processCanvasBlocksStageGestures()
+  ) {
+    const t = e.target as Node
+    if (t === processCanvas || processCanvas.contains(t)) {
+      if (findTrailHitIndex(e.clientX, e.clientY, processTrailDotRadius()) === null) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+/** Single-finger pan is disabled over the trail overlay while nudging; pinch/wheel/buttons still zoom. */
+function processSingleFingerPanBlocked(e: PointerEvent): boolean {
+  if (processMouseViewPanAllowed(e)) return false
+  if (!processCanvasBlocksStageGestures()) return false
+  const t = e.target as Node
+  return t === processCanvas || processCanvas.contains(t)
+}
+
 function syncCanvasSize(): void {
   // Layout coords relative to stage-inner (untransformed). Viewport deltas (ir − inner)
   // are wrong here because stage-inner uses transform: scale(mapZoom).
@@ -1014,6 +1180,268 @@ function updateProcessFileSummary(): void {
   processFilenamePl.textContent = label(processFilePl.files?.[0])
 }
 
+function clearProcessTrailState(): void {
+  processWalkPreamble = ''
+  processWalkTail = ''
+  processTrailEditable = []
+  processTrailOriginal = []
+  processWalkTestDate = null
+  processMergedPoints = []
+  processTrailDragIndex = null
+  processNudgeTrail.checked = false
+  processNudgeSnap.value = 'off'
+}
+
+function processTrailPixelsDirty(): boolean {
+  if (processTrailEditable.length !== processTrailOriginal.length) return true
+  for (let i = 0; i < processTrailEditable.length; i++) {
+    const a = processTrailEditable[i]!
+    const b = processTrailOriginal[i]!
+    if (a.x !== b.x || a.y !== b.y) return true
+  }
+  return false
+}
+
+function clampPixelToImage(x: number, y: number, iw: number, ih: number): { x: number; y: number } {
+  return {
+    x: Math.max(0, Math.min(iw - 1, x)),
+    y: Math.max(0, Math.min(ih - 1, y)),
+  }
+}
+
+function processTrailDotRadius(): number {
+  const w = processCanvas.width / (window.devicePixelRatio || 1)
+  const h = processCanvas.height / (window.devicePixelRatio || 1)
+  return Math.max(3, Math.min(w, h) / 80)
+}
+
+function findTrailHitIndex(clientX: number, clientY: number, dotR: number): number | null {
+  if (!processImg.naturalWidth || processTrailEditable.length === 0) return null
+  const local = clientToElementLocal(clientX, clientY, processCanvas)
+  if (!local) return null
+  const lx = local.x
+  const ly = local.y
+  const hitSlop = dotR + 14
+  let bestI: number | null = null
+  let bestD = Infinity
+  for (let i = 0; i < processTrailEditable.length; i++) {
+    const pt = processTrailEditable[i]!
+    const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+    if (!q) continue
+    const d = Math.hypot(lx - q.x, ly - q.y)
+    if (d <= hitSlop && d < bestD) {
+      bestD = d
+      bestI = i
+    }
+  }
+  return bestI
+}
+
+function updateProcessTrailChrome(): void {
+  const hasTrail = processTrailEditable.length > 0
+  const hasMap = Boolean(processImg.naturalWidth)
+  const hasPlotted = processMergedPoints.length > 0
+  const canNudge = hasTrail && hasMap && !hasPlotted
+  processNudgeTrail.disabled = !canNudge
+  if (!canNudge) {
+    processNudgeTrail.checked = false
+    processTrailDragIndex = null
+  }
+  processResetTrail.disabled = !hasTrail || !processTrailPixelsDirty() || hasPlotted
+  const saveDisabled = !hasTrail || !processTrailPixelsDirty()
+  processSaveWalkEdited.disabled = saveDisabled
+  processSaveWalkOriginal.disabled = saveDisabled
+  processBtnClearPlot.disabled = !hasPlotted
+  processNudgeSnap.disabled = !canNudge || processTrailEditable.length < 2
+  if (!canNudge || processTrailEditable.length < 2) {
+    processNudgeSnap.value = 'off'
+  }
+  const allowPointer = canNudge && processNudgeTrail.checked
+  processCanvas.style.pointerEvents = allowPointer ? 'auto' : 'none'
+  processCanvas.classList.toggle('process-overlay--adjust', allowPointer)
+  if (allowPointer) {
+    processCanvas.style.cursor = processTrailDragIndex !== null ? 'grabbing' : 'grab'
+  } else {
+    processCanvas.style.cursor = ''
+  }
+}
+
+function onTrailPointerDown(e: PointerEvent): void {
+  if (e.altKey && e.button === 0) return
+  if (e.button !== 0 || !processNudgeTrail.checked || processMergedPoints.length > 0) return
+  const i = findTrailHitIndex(e.clientX, e.clientY, processTrailDotRadius())
+  if (i === null) return
+  e.preventDefault()
+  processMergedPoints = []
+  processTrailDragIndex = i
+  processCanvas.setPointerCapture(e.pointerId)
+  updateProcessTrailChrome()
+}
+
+function snapAngleToStep(ang: number, snapDeg: number): number {
+  const stepRad = (snapDeg * Math.PI) / 180
+  return Math.round(ang / stepRad) * stepRad
+}
+
+/** Snap incoming segment only (last point, or single-neighbor cases handled elsewhere). */
+function nudgeSnapFromPrevOnly(
+  prev: { x: number; y: number },
+  raw: { x: number; y: number },
+  snapDeg: number
+): { x: number; y: number } {
+  const dx = raw.x - prev.x
+  const dy = raw.y - prev.y
+  const len = Math.hypot(dx, dy)
+  if (len < 0.25) return raw
+  const ang = snapAngleToStep(Math.atan2(dy, dx), snapDeg)
+  return {
+    x: prev.x + Math.cos(ang) * len,
+    y: prev.y + Math.sin(ang) * len,
+  }
+}
+
+/** Snap outgoing segment only (first point): curr→next direction snapped. */
+function nudgeSnapToNextOnly(
+  raw: { x: number; y: number },
+  next: { x: number; y: number },
+  snapDeg: number
+): { x: number; y: number } {
+  const dx = next.x - raw.x
+  const dy = next.y - raw.y
+  const len = Math.hypot(dx, dy)
+  if (len < 0.25) return raw
+  const ang = snapAngleToStep(Math.atan2(dy, dx), snapDeg)
+  return {
+    x: next.x - Math.cos(ang) * len,
+    y: next.y - Math.sin(ang) * len,
+  }
+}
+
+/**
+ * Snap nudged point using previous and/or next anchors. Middle points: intersect
+ * ray from prev (snapped incoming) with ray toward next (snapped outgoing).
+ */
+function applyNudgeAngleSnap(
+  raw: { x: number; y: number },
+  prev: { x: number; y: number } | null,
+  next: { x: number; y: number } | null,
+  snapDeg: number
+): { x: number; y: number } {
+  const unit = (a: number) => ({ x: Math.cos(a), y: Math.sin(a) })
+
+  if (prev && next) {
+    const dInX = raw.x - prev.x
+    const dInY = raw.y - prev.y
+    const lenIn = Math.hypot(dInX, dInY)
+    const dOutX = next.x - raw.x
+    const dOutY = next.y - raw.y
+    const lenOut = Math.hypot(dOutX, dOutY)
+    if (lenIn < 1e-6 && lenOut < 1e-6) return raw
+
+    const aInS = snapAngleToStep(Math.atan2(dInY, dInX), snapDeg)
+    const uIn = unit(aInS)
+    const aOutS = snapAngleToStep(Math.atan2(dOutY, dOutX), snapDeg)
+    const uOut = unit(aOutS)
+
+    const cIn = {
+      x: prev.x + uIn.x * lenIn,
+      y: prev.y + uIn.y * lenIn,
+    }
+    const cOut = {
+      x: next.x - uOut.x * lenOut,
+      y: next.y - uOut.y * lenOut,
+    }
+
+    const bx = next.x - prev.x
+    const by = next.y - prev.y
+    const det = uIn.x * uOut.y - uIn.y * uOut.x
+    if (Math.abs(det) < 1e-5) {
+      return { x: (cIn.x + cOut.x) / 2, y: (cIn.y + cOut.y) / 2 }
+    }
+
+    const s = (bx * uOut.y - by * uOut.x) / det
+    const t = (uIn.x * by - uIn.y * bx) / det
+    let cx = prev.x + s * uIn.x
+    let cy = prev.y + s * uIn.y
+    if (s < -0.5 || t < -0.5) {
+      cx = (cIn.x + cOut.x) / 2
+      cy = (cIn.y + cOut.y) / 2
+    }
+    return { x: cx, y: cy }
+  }
+
+  if (prev && !next) {
+    return nudgeSnapFromPrevOnly(prev, raw, snapDeg)
+  }
+  if (!prev && next) {
+    return nudgeSnapToNextOnly(raw, next, snapDeg)
+  }
+  return raw
+}
+
+function onTrailPointerMove(e: PointerEvent): void {
+  if (processTrailDragIndex === null || !processImg.naturalWidth) return
+  const hit = clientToImagePixel(e.clientX, e.clientY, processImg)
+  if (!hit.ok) return
+  const iw = processImg.naturalWidth
+  const ih = processImg.naturalHeight
+  let c = clampPixelToImage(hit.pixel.x, hit.pixel.y, iw, ih)
+  const idx = processTrailDragIndex
+  const snapVal = processNudgeSnap.value
+  if (snapVal !== 'off') {
+    const deg = snapVal === '90' ? 90 : 45
+    const prev = idx > 0 ? processTrailEditable[idx - 1]! : null
+    const next =
+      idx < processTrailEditable.length - 1 ? processTrailEditable[idx + 1]! : null
+    const snapped = applyNudgeAngleSnap(c, prev, next, deg)
+    c = clampPixelToImage(snapped.x, snapped.y, iw, ih)
+  }
+  const cur = processTrailEditable[idx]!
+  processTrailEditable[idx] = { ...cur, x: c.x, y: c.y }
+  processMergedPoints = []
+  drawProcessOverlay()
+  e.preventDefault()
+}
+
+function onTrailPointerUp(e: PointerEvent): void {
+  if (processTrailDragIndex === null) return
+  processTrailDragIndex = null
+  try {
+    processCanvas.releasePointerCapture(e.pointerId)
+  } catch {
+    /* already released */
+  }
+  drawProcessOverlay()
+}
+
+function downloadProcessWalkCsv(mode: 'edited' | 'original'): void {
+  if (!processWalkPreamble || !processTrailEditable.length) return
+  const text = serializeWalkplotterEditable(processWalkPreamble, processTrailEditable, processWalkTail)
+  const f = processFileWalk.files?.[0]
+  let filename: string
+  if (mode === 'edited') {
+    const stem = (f?.name.replace(/\.csv$/i, '') ?? 'walkplotter-trail').replace(/[/\\?%*:|"<>]/g, '-')
+    filename = `${stem}-edited.csv`.replace(/\s+/g, ' ').slice(0, 200)
+  } else {
+    filename = (f?.name ?? 'walkplotter-trail.csv').replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, ' ').slice(0, 200)
+  }
+  if (!filename.toLowerCase().endsWith('.csv')) filename += '.csv'
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+  processTrailOriginal = processTrailEditable.map((r) => ({ ...r }))
+  const hint =
+    mode === 'original'
+      ? ' If you pick the same folder and filename in the save dialog, you can replace the existing file.'
+      : ''
+  processStatus.textContent = `Saved ${filename}.${hint} Plot path loss uses the trail currently in memory.`
+  drawProcessOverlay()
+}
+
 function syncProcessOverlayCanvas(): void {
   const left = processImg.offsetLeft
   const top = processImg.offsetTop
@@ -1037,68 +1465,230 @@ function drawProcessOverlay(): void {
   if (!ctx || !processImg.naturalWidth) {
     if (processLegend) processLegend.hidden = true
     processHistogramWrap.hidden = true
+    updateProcessTrailChrome()
     return
   }
   syncProcessOverlayCanvas()
   const w = processCanvas.width / (window.devicePixelRatio || 1)
   const h = processCanvas.height / (window.devicePixelRatio || 1)
   ctx.clearRect(0, 0, w, h)
-  if (processMergedPoints.length === 0) {
-    processLegend.hidden = true
-    processHistogramWrap.hidden = true
-    processHistogramBody.innerHTML = ''
+
+  const hasPlotted = processMergedPoints.length > 0
+  const hasTrail = processTrailEditable.length > 0
+  const dotR = Math.max(3, Math.min(w, h) / 80)
+
+  if (hasPlotted) {
+    let minPl = processMergedPoints[0]!.pathLoss
+    let maxPl = minPl
+    for (const p of processMergedPoints) {
+      if (p.pathLoss < minPl) minPl = p.pathLoss
+      if (p.pathLoss > maxPl) maxPl = p.pathLoss
+    }
+    const routeColors = getOverlayColors()
+    const routePs = Math.min(1.2, Math.max(0.8, dotR / 5))
+    const trailDiameter = 2 * dotR
+    if (processShowPlColoredTrail.checked && processMergedPoints.length > 1) {
+      ctx.lineJoin = 'round'
+      ctx.lineCap = 'round'
+      ctx.globalAlpha = 1
+      for (let i = 0; i < processMergedPoints.length - 1; i++) {
+        const a = processMergedPoints[i]!
+        const b = processMergedPoints[i + 1]!
+        const q0 = imagePixelToElementLocal(a.x, a.y, processImg)
+        const q1 = imagePixelToElementLocal(b.x, b.y, processImg)
+        if (!q0 || !q1) continue
+        const g = ctx.createLinearGradient(q0.x, q0.y, q1.x, q1.y)
+        g.addColorStop(0, pathLossToColor(a.pathLoss))
+        g.addColorStop(1, pathLossToColor(b.pathLoss))
+        ctx.strokeStyle = g
+        ctx.lineWidth = trailDiameter
+        ctx.beginPath()
+        ctx.moveTo(q0.x, q0.y)
+        ctx.lineTo(q1.x, q1.y)
+        ctx.stroke()
+      }
+    }
+    if (processShowPlRoute.checked && processMergedPoints.length > 1) {
+      ctx.strokeStyle = routeColors.trailLine
+      ctx.globalAlpha = 0.5
+      ctx.lineWidth = Math.max(1.25, 2 * routePs)
+      ctx.lineJoin = 'round'
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      let first = true
+      for (const pt of processMergedPoints) {
+        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        if (!q) continue
+        if (first) {
+          ctx.moveTo(q.x, q.y)
+          first = false
+        } else {
+          ctx.lineTo(q.x, q.y)
+        }
+      }
+      ctx.stroke()
+      ctx.globalAlpha = 1
+    }
+    const trailOnlyRibbon =
+      processShowPlColoredTrail.checked && processMergedPoints.length > 1
+    if (!trailOnlyRibbon) {
+      for (const pt of processMergedPoints) {
+        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        if (!q) continue
+        const isOriginalWalk = pt.source !== 'interpolated'
+        ctx.fillStyle = pathLossToColor(pt.pathLoss)
+        ctx.beginPath()
+        ctx.arc(q.x, q.y, dotR, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)'
+        ctx.lineWidth = 1
+        ctx.stroke()
+        if (isOriginalWalk) {
+          ctx.strokeStyle = 'rgba(168, 174, 184, 0.95)'
+          ctx.lineWidth = Math.max(1.5, 2 * routePs)
+          ctx.beginPath()
+          ctx.arc(q.x, q.y, dotR + 2.5, 0, Math.PI * 2)
+          ctx.stroke()
+        }
+      }
+    }
+    if (processShowPlLabels.checked) {
+      const fontPx = Math.max(11, Math.min(16, Math.min(w, h) / 48))
+      ctx.font = `600 ${fontPx}px system-ui, Segoe UI, sans-serif`
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.lineJoin = 'round'
+      ctx.miterLimit = 2
+      const labelDx = trailOnlyRibbon ? trailDiameter / 2 + 5 : dotR + 4
+      for (const pt of processMergedPoints) {
+        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        if (!q) continue
+        const text = `${pt.pathLoss.toFixed(1)} dBm`
+        const lx = q.x + labelDx
+        const ly = q.y
+        ctx.lineWidth = Math.max(2, fontPx * 0.22)
+        ctx.strokeStyle = 'rgba(0,0,0,0.82)'
+        ctx.strokeText(text, lx, ly)
+        ctx.fillStyle = 'rgba(255,255,255,0.96)'
+        ctx.fillText(text, lx, ly)
+      }
+    }
+    const nInterp = processMergedPoints.filter((p) => p.source === 'interpolated').length
+    const nUser = processMergedPoints.length - nInterp
+    const walkTypesLegend =
+      nUser > 0 || nInterp > 0
+        ? `<span>Walk: <strong>${nUser}</strong> original <span class="process-legend-user-ring" title="Original (non-interpolated) points — grey ring; fill is still path loss (dBm)."></span> · <strong>${nInterp}</strong> interpolated (no ring)</span>`
+        : ''
+    processLegend.hidden = false
+    processLegend.innerHTML = `<div class="process-legend-inner">
+    <span>Color scale <strong>−30</strong> … <strong>−100</strong> dBm (outside range is clamped)</span>
+    <span class="process-legend-gradient" style="background:${pathLossScaleGradientCss()}"></span>
+    ${walkTypesLegend}
+    <span>${processMergedPoints.length} pts · data <strong>${minPl.toFixed(1)}</strong>–<strong>${maxPl.toFixed(1)}</strong> dBm</span>
+  </div>`
+    updateProcessHistogramTable()
+    updateProcessTrailChrome()
     return
   }
 
-  let minPl = processMergedPoints[0]!.pathLoss
-  let maxPl = minPl
-  for (const p of processMergedPoints) {
-    if (p.pathLoss < minPl) minPl = p.pathLoss
-    if (p.pathLoss > maxPl) maxPl = p.pathLoss
-  }
+  if (hasTrail) {
+    const colors = getOverlayColors()
+    const trailPs = Math.min(1.25, Math.max(0.85, dotR / 5.5))
+    const nudgeOn = processNudgeTrail.checked && processMergedPoints.length === 0
 
-  const dotR = Math.max(3, Math.min(w, h) / 80)
+    if (processTrailEditable.length > 0) {
+      ctx.strokeStyle = colors.trailLine
+      ctx.globalAlpha = 0.55
+      ctx.lineWidth = Math.max(1, 2 * trailPs)
+      ctx.lineJoin = 'round'
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      for (let i = 0; i < processTrailEditable.length; i++) {
+        const pt = processTrailEditable[i]!
+        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        if (!q) continue
+        if (i === 0 || pt.newSegment === '1') {
+          ctx.moveTo(q.x, q.y)
+        } else {
+          ctx.lineTo(q.x, q.y)
+        }
+      }
+      ctx.stroke()
+      ctx.globalAlpha = 1
+    }
 
-  for (const pt of processMergedPoints) {
-    const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
-    if (!q) continue
-    ctx.fillStyle = pathLossToColor(pt.pathLoss)
-    ctx.beginPath()
-    ctx.arc(q.x, q.y, dotR, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.strokeStyle = 'rgba(0,0,0,0.45)'
-    ctx.lineWidth = 1
-    ctx.stroke()
-  }
+    let crossLocal: { x: number; y: number } | null = null
+    let crossIdx: number | null = null
+    if (nudgeOn && processTrailEditable.length > 0) {
+      const idx =
+        processTrailDragIndex !== null
+          ? processTrailDragIndex
+          : processTrailEditable.length - 1
+      const cpt = processTrailEditable[idx]!
+      crossLocal = imagePixelToElementLocal(cpt.x, cpt.y, processImg)
+      crossIdx = idx
+    }
 
-  if (processShowPlLabels.checked) {
-    const fontPx = Math.max(11, Math.min(16, Math.min(w, h) / 48))
-    ctx.font = `600 ${fontPx}px system-ui, Segoe UI, sans-serif`
-    ctx.textAlign = 'left'
-    ctx.textBaseline = 'middle'
-    ctx.lineJoin = 'round'
-    ctx.miterLimit = 2
-    for (const pt of processMergedPoints) {
+    if (crossLocal) {
+      ctx.save()
+      ctx.strokeStyle = colors.crosshair
+      ctx.lineWidth = Math.max(0.5, 1 * trailPs)
+      ctx.setLineDash([7, 5])
+      ctx.lineCap = 'butt'
+      ctx.beginPath()
+      ctx.moveTo(0, crossLocal.y)
+      ctx.lineTo(w, crossLocal.y)
+      ctx.moveTo(crossLocal.x, 0)
+      ctx.lineTo(crossLocal.x, h)
+      ctx.stroke()
+      ctx.restore()
+    }
+
+    for (let i = 0; i < processTrailEditable.length; i++) {
+      const pt = processTrailEditable[i]!
       const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
       if (!q) continue
-      const text = `${pt.pathLoss.toFixed(1)} dBm`
-      const lx = q.x + dotR + 4
-      const ly = q.y
-      ctx.lineWidth = Math.max(2, fontPx * 0.22)
-      ctx.strokeStyle = 'rgba(0,0,0,0.82)'
-      ctx.strokeText(text, lx, ly)
-      ctx.fillStyle = 'rgba(255,255,255,0.96)'
-      ctx.fillText(text, lx, ly)
+      const showRing = nudgeOn && crossIdx !== null && i === crossIdx
+      if (showRing) {
+        ctx.strokeStyle = colors.crosshairRing
+        ctx.lineWidth = Math.max(1, 2 * trailPs)
+        ctx.setLineDash([])
+        ctx.beginPath()
+        ctx.arc(q.x, q.y, Math.max(3, 11 * trailPs), 0, Math.PI * 2)
+        ctx.stroke()
+      }
+      ctx.fillStyle = 'rgba(46, 230, 166, 0.92)'
+      ctx.beginPath()
+      ctx.arc(q.x, q.y, dotR, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)'
+      ctx.lineWidth = 1
+      ctx.setLineDash([])
+      ctx.stroke()
+      if (pt.source !== 'interpolated') {
+        ctx.strokeStyle = 'rgba(168, 174, 184, 0.95)'
+        ctx.lineWidth = Math.max(1.5, 2 * trailPs)
+        ctx.beginPath()
+        ctx.arc(q.x, q.y, dotR + 2.5, 0, Math.PI * 2)
+        ctx.stroke()
+      }
     }
+    const nInterpTrail = processTrailEditable.filter((p) => p.source === 'interpolated').length
+    const nUserTrail = processTrailEditable.length - nInterpTrail
+    processLegend.hidden = false
+    processLegend.innerHTML = `<div class="process-legend-inner process-legend-inner--trail-preview">
+    <span>Trail preview — <strong>${nUserTrail}</strong> original <span class="process-legend-user-ring" title="Original (non-interpolated) points — grey ring."></span> · <strong>${nInterpTrail}</strong> interpolated (no ring)</span>
+  </div>`
+    processHistogramWrap.hidden = true
+    processHistogramBody.innerHTML = ''
+    updateProcessTrailChrome()
+    return
   }
 
-  processLegend.hidden = false
-  processLegend.innerHTML = `<div class="process-legend-inner">
-    <span>Color scale <strong>−30</strong> … <strong>−100</strong> dBm (outside range is clamped)</span>
-    <span class="process-legend-gradient" style="background:${pathLossScaleGradientCss()}"></span>
-    <span>${processMergedPoints.length} pts · data <strong>${minPl.toFixed(1)}</strong>–<strong>${maxPl.toFixed(1)}</strong> dBm</span>
-  </div>`
-  updateProcessHistogramTable()
+  processLegend.hidden = true
+  processHistogramWrap.hidden = true
+  processHistogramBody.innerHTML = ''
+  updateProcessTrailChrome()
 }
 
 function readFileAsText(f: File): Promise<string> {
@@ -1117,15 +1707,22 @@ function runProcessPlot(): void {
     processStatus.textContent = 'Load a floor plan image first.'
     return
   }
-  if (!walkFile || !plFile) {
-    processStatus.textContent = 'Choose both Walkplotter CSV and path loss CSV.'
+  if (!processTrailEditable.length) {
+    processStatus.textContent = 'Load a Walkplotter CSV with trail rows first.'
+    return
+  }
+  if (!plFile) {
+    processStatus.textContent = 'Choose a path loss CSV.'
     return
   }
   void (async () => {
     try {
-      const walkText = await readFileAsText(walkFile)
       const plText = await readFileAsText(plFile)
-      const testDate = extractWalkplotterTestDate(walkText)
+      let testDate = processWalkTestDate
+      if (!testDate && walkFile) {
+        const walkText = await readFileAsText(walkFile)
+        testDate = extractWalkplotterTestDate(walkText)
+      }
       if (!testDate) {
         processStatus.textContent =
           'Walkplotter CSV has no # test_date_local: YYYY-MM-DD header — cannot align times.'
@@ -1133,14 +1730,7 @@ function runProcessPlot(): void {
         drawProcessOverlay()
         return
       }
-      const trail = parseWalkplotterTrailRows(walkText)
       const plRows = parsePathLossCsv(plText)
-      if (!trail.length) {
-        processStatus.textContent = 'No trail rows found in Walkplotter CSV.'
-        processMergedPoints = []
-        drawProcessOverlay()
-        return
-      }
       if (!plRows.length) {
         processStatus.textContent =
           'No path loss rows found (expect HH:MM:SS first field, 4th field = number).'
@@ -1148,13 +1738,14 @@ function runProcessPlot(): void {
         drawProcessOverlay()
         return
       }
-      processMergedPoints = mergeByNearestTime(testDate, trail, plRows, DEFAULT_MAX_MATCH_MS)
+      const trailForMerge: WalkplotterTrailRow[] = processTrailEditable
+      processMergedPoints = mergeByNearestTime(testDate, trailForMerge, plRows, DEFAULT_MAX_MATCH_MS)
       if (!processMergedPoints.length) {
         processStatus.textContent = `No points matched within ${DEFAULT_MAX_MATCH_MS / 1000}s — check times and date (${testDate}).`
         drawProcessOverlay()
         return
       }
-      processStatus.textContent = `Matched ${processMergedPoints.length} of ${trail.length} trail samples to nearest RF reading (date ${testDate}).`
+      processStatus.textContent = `Matched ${processMergedPoints.length} of ${processTrailEditable.length} trail samples to nearest RF reading (date ${testDate}).`
       drawProcessOverlay()
     } catch (e) {
       processStatus.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`
@@ -1208,6 +1799,7 @@ function setTab(which: 'map' | 'controls' | 'process'): void {
   panelProcess.hidden = !processActive
   redraw()
   if (processActive) {
+    applyProcessViewTransform()
     syncProcessOverlayCanvas()
     drawProcessOverlay()
   }
@@ -1437,12 +2029,17 @@ processFilePlan.addEventListener('change', () => {
     URL.revokeObjectURL(processPlanObjectUrl)
     processPlanObjectUrl = null
   }
-  processMergedPoints = []
+  clearProcessTrailState()
+  processFileWalk.value = ''
+  processFilePl.value = ''
   if (!f || !f.type.startsWith('image/')) {
     processImg.removeAttribute('src')
     processPlaceholder.hidden = false
     processStage.classList.remove('has-image')
-    processStatus.textContent = 'Choose files, then tap Plot path loss.'
+    processZoomBar.hidden = true
+    processMouseHint.hidden = true
+    resetProcessView()
+    processStatus.textContent = 'Load floor plan and Walkplotter CSV to begin.'
     drawProcessOverlay()
     updateProcessFileSummary()
     return
@@ -1452,18 +2049,93 @@ processFilePlan.addEventListener('change', () => {
   updateProcessFileSummary()
 })
 
-processFileWalk.addEventListener('change', updateProcessFileSummary)
+processFileWalk.addEventListener('change', () => {
+  void (async () => {
+    updateProcessFileSummary()
+    processMergedPoints = []
+    processTrailDragIndex = null
+    processNudgeTrail.checked = false
+    const f = processFileWalk.files?.[0]
+    if (!f) {
+      processWalkPreamble = ''
+      processWalkTail = ''
+      processTrailEditable = []
+      processTrailOriginal = []
+      processWalkTestDate = null
+      processStatus.textContent = 'Load floor plan and Walkplotter CSV to begin.'
+      drawProcessOverlay()
+      return
+    }
+    try {
+      const text = await readFileAsText(f)
+      const parsed = parseWalkplotterEditable(text)
+      if (!parsed || !parsed.trail.length) {
+        processWalkPreamble = ''
+        processWalkTail = ''
+        processTrailEditable = []
+        processTrailOriginal = []
+        processWalkTestDate = null
+        processStatus.textContent =
+          'Could not parse trail rows (need a header line starting with timestamp,x,y,…).'
+        drawProcessOverlay()
+        return
+      }
+      processWalkPreamble = parsed.preamble
+      processWalkTail = parsed.tail
+      processTrailEditable = parsed.trail.map((r) => ({ ...r }))
+      processTrailOriginal = parsed.trail.map((r) => ({ ...r }))
+      processWalkTestDate = extractWalkplotterTestDate(text)
+      processMergedPoints = []
+      if (!processWalkTestDate) {
+        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Add # test_date_local: YYYY-MM-DD for Plot path loss.`
+      } else {
+        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Nudge and save if needed, then choose path loss CSV and Plot path loss.`
+      }
+      drawProcessOverlay()
+    } catch (e) {
+      processStatus.textContent = `Error reading CSV: ${e instanceof Error ? e.message : String(e)}`
+      clearProcessTrailState()
+      drawProcessOverlay()
+    }
+  })()
+})
+
 processFilePl.addEventListener('change', updateProcessFileSummary)
 
 processImg.addEventListener('load', () => {
   processPlaceholder.hidden = true
   processStage.classList.add('has-image')
+  processZoomBar.hidden = false
+  processMouseHint.hidden = false
+  resetProcessView()
   syncProcessOverlayCanvas()
   drawProcessOverlay()
 })
 
 processBtnPlot.addEventListener('click', () => runProcessPlot())
+processBtnClearPlot.addEventListener('click', () => {
+  processMergedPoints = []
+  drawProcessOverlay()
+})
 processShowPlLabels.addEventListener('change', () => drawProcessOverlay())
+processShowPlRoute.addEventListener('change', () => drawProcessOverlay())
+processShowPlColoredTrail.addEventListener('change', () => drawProcessOverlay())
+processNudgeTrail.addEventListener('change', () => {
+  processTrailDragIndex = null
+  drawProcessOverlay()
+})
+processNudgeSnap.addEventListener('change', () => drawProcessOverlay())
+processResetTrail.addEventListener('click', () => {
+  processTrailEditable = processTrailOriginal.map((r) => ({ ...r }))
+  processMergedPoints = []
+  drawProcessOverlay()
+})
+processSaveWalkEdited.addEventListener('click', () => downloadProcessWalkCsv('edited'))
+processSaveWalkOriginal.addEventListener('click', () => downloadProcessWalkCsv('original'))
+processCanvas.addEventListener('pointerdown', onTrailPointerDown)
+processCanvas.addEventListener('pointermove', onTrailPointerMove)
+processCanvas.addEventListener('pointerup', onTrailPointerUp)
+processCanvas.addEventListener('pointercancel', onTrailPointerUp)
 updateProcessFileSummary()
 
 function commitTapIfPending(e: PointerEvent, wasTapPending: boolean): void {
@@ -1610,6 +2282,153 @@ btnZoomReset.addEventListener('click', () => {
   if (!img.naturalWidth) return
   resetMapView()
   redraw()
+})
+
+function onProcessStagePointerDown(e: PointerEvent): void {
+  if (!processImg.naturalWidth) return
+  if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+    e.preventDefault()
+  }
+  if (e.pointerType === 'mouse' && e.button === 1) {
+    e.preventDefault()
+  }
+  processPointerPositions.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY })
+  if (processPointerPositions.size >= 2) {
+    const pts = [...processPointerPositions.values()]
+    const p0 = pts[0]!
+    const p1 = pts[1]!
+    processPinchStartDist = pointerDist(p0, p1)
+    processPinchStartZoom = processZoom
+    processGestureKind = 'pinch'
+    return
+  }
+  if (processSingleFingerPanBlocked(e)) return
+  processPanSlopPx = e.pointerType === 'touch' ? TAP_MAX_MOVE_TOUCH_PX : TAP_MAX_MOVE_MOUSE_PX
+  processPanStartClientX = e.clientX
+  processPanStartClientY = e.clientY
+  processPanPointerId = e.pointerId
+  try {
+    processStage.setPointerCapture(e.pointerId)
+  } catch {
+    /* ignore */
+  }
+  if (processMouseViewPanAllowed(e)) {
+    processGestureKind = 'pan'
+    processPanStartPanX = processPanX
+    processPanStartPanY = processPanY
+  } else {
+    processGestureKind = 'pan-pending'
+  }
+}
+
+/** Capture so a second finger still registers for pinch while the overlay is receiving the first (nudge). */
+processStage.addEventListener('pointerdown', onProcessStagePointerDown, { capture: true })
+
+processStage.addEventListener('pointermove', (e) => {
+  if (!processPointerPositions.has(e.pointerId)) return
+  processPointerPositions.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY })
+
+  if (processGestureKind === 'pinch' && processPointerPositions.size >= 2) {
+    const pts = [...processPointerPositions.values()]
+    const p0 = pts[0]!
+    const p1 = pts[1]!
+    const d = pointerDist(p0, p1)
+    if (processPinchStartDist > 1e-6) {
+      const zOld = processZoom
+      const zNew = clampMapZoom(processPinchStartZoom * (d / processPinchStartDist))
+      const rect = processStage.getBoundingClientRect()
+      const mx = (p0.clientX + p1.clientX) / 2 - rect.left
+      const my = (p0.clientY + p1.clientY) / 2 - rect.top
+      zoomAroundProcessPoint(zNew, mx, my, zOld)
+      applyProcessViewTransform()
+      updateProcessZoomPctLabel()
+      drawProcessOverlay()
+    }
+    return
+  }
+
+  if (processGestureKind === 'pan-pending' && e.pointerId === processPanPointerId) {
+    const moved = Math.hypot(e.clientX - processPanStartClientX, e.clientY - processPanStartClientY)
+    if (moved > processPanSlopPx) {
+      processGestureKind = 'pan'
+      processPanStartClientX = e.clientX
+      processPanStartClientY = e.clientY
+      processPanStartPanX = processPanX
+      processPanStartPanY = processPanY
+    }
+  }
+
+  if (
+    processGestureKind === 'pan' &&
+    e.pointerId === processPanPointerId &&
+    processPointerPositions.size === 1
+  ) {
+    processPanX = processPanStartPanX + (e.clientX - processPanStartClientX)
+    processPanY = processPanStartPanY + (e.clientY - processPanStartClientY)
+    applyProcessViewTransform()
+    drawProcessOverlay()
+  }
+})
+
+processStage.addEventListener('pointerup', (e) => {
+  processPointerPositions.delete(e.pointerId)
+  if (processPointerPositions.size === 0) {
+    processGestureKind = 'idle'
+  } else if (processPointerPositions.size === 1 && processGestureKind === 'pinch') {
+    processGestureKind = 'idle'
+  }
+})
+
+processStage.addEventListener('pointercancel', (e) => {
+  processPointerPositions.delete(e.pointerId)
+  if (processPointerPositions.size === 0) {
+    processGestureKind = 'idle'
+  }
+})
+
+processStage.addEventListener('auxclick', (e) => {
+  if (e.button === 1) e.preventDefault()
+})
+
+function onProcessWheel(e: WheelEvent): void {
+  if (!processImg.naturalWidth) return
+  e.preventDefault()
+  const factor = e.deltaY < 0 ? 1.08 : 0.92
+  const rect = processStage.getBoundingClientRect()
+  const fx = e.clientX - rect.left
+  const fy = e.clientY - rect.top
+  const zOld = processZoom
+  const zNew = clampMapZoom(processZoom * factor)
+  zoomAroundProcessPoint(zNew, fx, fy, zOld)
+  applyProcessViewTransform()
+  updateProcessZoomPctLabel()
+  drawProcessOverlay()
+}
+
+processStage.addEventListener('wheel', onProcessWheel, { passive: false })
+processCanvas.addEventListener(
+  'wheel',
+  (e) => {
+    onProcessWheel(e)
+    e.stopPropagation()
+  },
+  { passive: false }
+)
+
+processBtnZoomIn.addEventListener('click', () => {
+  if (!processImg.naturalWidth) return
+  applyProcessZoomFactor(ZOOM_BTN_FACTOR)
+})
+
+processBtnZoomOut.addEventListener('click', () => {
+  if (!processImg.naturalWidth) return
+  applyProcessZoomFactor(1 / ZOOM_BTN_FACTOR)
+})
+
+processBtnZoomReset.addEventListener('click', () => {
+  if (!processImg.naturalWidth) return
+  resetProcessView()
+  drawProcessOverlay()
 })
 
 pinSizeRange.addEventListener('input', () => {

@@ -565,6 +565,57 @@ body {
     0 2px 8px rgba(46, 230, 166, 0.28);
 }
 
+.process-toolbar--adjust {
+  margin-top: -4px;
+  padding-top: 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.process-snap-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: var(--surface);
+  font-size: 14px;
+  color: var(--text);
+}
+
+.process-snap-label {
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.process-nudge-snap {
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  min-width: 7.25rem;
+}
+
+.process-nudge-snap:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.process-overlay--adjust {
+  touch-action: none;
+}
+
+.process-legend-note {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .process-files-summary {
   font-size: 13px;
   color: var(--muted);
@@ -621,6 +672,12 @@ body {
   gap: 10px 14px;
 }
 
+.process-legend-inner--trail-preview {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
 .process-legend-gradient {
   display: inline-block;
   height: 10px;
@@ -629,6 +686,18 @@ body {
   max-width: 280px;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.process-legend-user-ring {
+  display: inline-block;
+  vertical-align: -2px;
+  width: 11px;
+  height: 11px;
+  margin-left: 3px;
+  border-radius: 50%;
+  border: 2px solid rgba(168, 174, 184, 0.95);
+  box-sizing: border-box;
+  background: transparent;
 }
 
 .process-histogram-wrap {
@@ -681,6 +750,17 @@ body {
   border-bottom: none;
 }
 
+.process-mouse-hint {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.process-mouse-hint strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
 .process-stage-wrap {
   flex: 1;
   display: flex;
@@ -697,10 +777,22 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: #0f1c19;
   display: none;
+  touch-action: none;
+  overscroll-behavior: none;
 }
 
 .process-stage.has-image {
   display: block;
+}
+
+.process-stage-inner {
+  position: relative;
+  display: inline-block;
+  vertical-align: top;
+  transform: translate(var(--process-pan-x, 0px), var(--process-pan-y, 0px))
+    scale(var(--process-zoom, 1));
+  transform-origin: 0 0;
+  touch-action: none;
 }
 
 .process-stage img {
