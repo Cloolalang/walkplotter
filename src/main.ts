@@ -1,6 +1,12 @@
 import './style.css'
 import { clientToElementLocal, clientToImagePixel, imagePixelToElementLocal } from './coords'
 import {
+  fsplDisplayFrequencyOptionsMhz,
+  fsplMeasuredFrequencyOptionsMhz,
+  fsplPathLossDeltaDb,
+  fsplPathLossNegativeConvention,
+} from './fspl'
+import {
   DEFAULT_MAX_MATCH_MS,
   extractWalkplotterTestDate,
   mergeByNearestTime,
@@ -36,6 +42,8 @@ let pendingPoi: { x: number; y: number } | null = null
 
 let processPlanObjectUrl: string | null = null
 let processMergedPoints: MergedPlotPoint[] = []
+/** Unscaled merge result; FSPL UI derives `processMergedPoints` from this. */
+let processMergedPointsRaw: MergedPlotPoint[] = []
 /** Walkplotter trail loaded in Process tab; x/y edits are saved via Save Walkplotter CSV. */
 let processWalkPreamble = ''
 let processWalkTail = ''
@@ -569,7 +577,7 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--process" id="panel-process" role="tabpanel" aria-labelledby="tab-process" hidden>
     <p class="hint process-hint">
-      Load the <strong>floor plan</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss, 1st = HH:MM:SS) and <strong>Plot path loss</strong>. Nearest-time match within
+      Load the <strong>floor plan</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss in <strong>dB</strong>, 1st = HH:MM:SS) and <strong>Plot path loss</strong>. Nearest-time match within
       ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>.
     </p>
     <div class="process-toolbar">
@@ -589,7 +597,7 @@ app.innerHTML = `
       <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss overlay to edit the trail again">
         Clear path loss plot
       </button>
-      <label class="toolbar-toggle process-toolbar-toggle" title="Show path loss (dBm) next to each point">
+      <label class="toolbar-toggle process-toolbar-toggle" title="Show path loss (dB) next to each point">
         <input type="checkbox" id="process-show-pl-labels" />
         Point labels
       </label>
@@ -601,6 +609,23 @@ app.innerHTML = `
         <input type="checkbox" id="process-show-pl-colored-trail" />
         Color-coded trail
       </label>
+    </div>
+    <div class="process-toolbar process-toolbar--fspl" id="process-fspl-wrap" hidden>
+      <label class="toolbar-toggle process-toolbar-toggle process-fspl-toggle" title="Free space vs 2.4 GHz measurement. Positive PL (dB): add 20·log₁₀(f_est/f_meas). Negative PL values (some gear): correction is sign-flipped so lower frequency still shows less loss.">
+        <input type="checkbox" id="process-fspl-enable" disabled />
+        FSPL frequency estimate
+      </label>
+      <label class="process-fspl-field" for="process-fspl-target"
+        ><span class="process-fspl-field-label">Estimate at</span>
+        <select id="process-fspl-target" class="process-fspl-select" disabled aria-label="Frequency to estimate path loss at (MHz)"></select>
+        <span class="process-fspl-unit">MHz</span></label
+      >
+      <label class="process-fspl-field" for="process-fspl-ref"
+        ><span class="process-fspl-field-label">Measured at (2.4 GHz)</span>
+        <select id="process-fspl-ref" class="process-fspl-select" disabled aria-label="Actual walk test frequency in MHz"></select>
+        <span class="process-fspl-unit">MHz</span></label
+      >
+      <span class="process-fspl-delta" id="process-fspl-delta" aria-live="polite"></span>
     </div>
     <div class="process-toolbar process-toolbar--adjust">
       <label class="toolbar-toggle process-toolbar-toggle" title="Drag trail dots to adjust image pixel coordinates; use Save when ready">
@@ -647,8 +672,9 @@ app.innerHTML = `
         <table class="process-histogram-table">
           <thead>
             <tr>
-              <th scope="col">Bin (dBm)</th>
+              <th scope="col">Bin (dB)</th>
               <th scope="col">Count</th>
+              <th scope="col">Seconds</th>
               <th scope="col">%</th>
             </tr>
           </thead>
@@ -773,6 +799,11 @@ const processBtnClearPlot = document.querySelector<HTMLButtonElement>('#process-
 const processShowPlLabels = document.querySelector<HTMLInputElement>('#process-show-pl-labels')!
 const processShowPlRoute = document.querySelector<HTMLInputElement>('#process-show-pl-route')!
 const processShowPlColoredTrail = document.querySelector<HTMLInputElement>('#process-show-pl-colored-trail')!
+const processFsplWrap = document.querySelector<HTMLDivElement>('#process-fspl-wrap')!
+const processFsplEnable = document.querySelector<HTMLInputElement>('#process-fspl-enable')!
+const processFsplRef = document.querySelector<HTMLSelectElement>('#process-fspl-ref')!
+const processFsplTarget = document.querySelector<HTMLSelectElement>('#process-fspl-target')!
+const processFsplDelta = document.querySelector<HTMLSpanElement>('#process-fspl-delta')!
 const processNudgeTrail = document.querySelector<HTMLInputElement>('#process-nudge-trail')!
 const processNudgeSnap = document.querySelector<HTMLSelectElement>('#process-nudge-snap')!
 const processResetTrail = document.querySelector<HTMLButtonElement>('#process-reset-trail')!
@@ -1059,24 +1090,24 @@ function syncCanvasSize(): void {
   }
 }
 
-/** Fixed path-loss color scale for Process overlay (dBm): −30 (light blue) → −100 (dark grey). */
+/** Fixed path-loss color scale for Process overlay (dB): −30 (light blue) → −100 (dark grey). */
 const PROCESS_PL_GOOD = -30
 const PROCESS_PL_BAD = -100
 
 type PlRgb = readonly [number, number, number]
 
 /** Stops from weak (−100) to strong (−30); greys below −90, warm colors toward −70, cool palette toward −30. */
-const PL_COLOR_STOPS: readonly { dbm: number; rgb: PlRgb }[] = [
-  { dbm: -100, rgb: [44, 44, 48] },
-  { dbm: -90, rgb: [125, 125, 128] },
-  { dbm: -80, rgb: [155, 85, 82] },
-  { dbm: -72, rgb: [210, 42, 38] },
-  { dbm: -68, rgb: [255, 118, 28] },
-  { dbm: -62, rgb: [255, 205, 45] },
-  { dbm: -54, rgb: [48, 155, 88] },
-  { dbm: -46, rgb: [28, 78, 168] },
-  { dbm: -38, rgb: [72, 138, 215] },
-  { dbm: -30, rgb: [186, 228, 255] },
+const PL_COLOR_STOPS: readonly { db: number; rgb: PlRgb }[] = [
+  { db: -100, rgb: [44, 44, 48] },
+  { db: -90, rgb: [125, 125, 128] },
+  { db: -80, rgb: [155, 85, 82] },
+  { db: -72, rgb: [210, 42, 38] },
+  { db: -68, rgb: [255, 118, 28] },
+  { db: -62, rgb: [255, 205, 45] },
+  { db: -54, rgb: [48, 155, 88] },
+  { db: -46, rgb: [28, 78, 168] },
+  { db: -38, rgb: [72, 138, 215] },
+  { db: -30, rgb: [186, 228, 255] },
 ]
 
 function lerpChannel(a: number, b: number, t: number): number {
@@ -1086,19 +1117,19 @@ function lerpChannel(a: number, b: number, t: number): number {
 function pathLossToColor(pl: number): string {
   const x = Math.max(PROCESS_PL_BAD, Math.min(PROCESS_PL_GOOD, pl))
   const stops = PL_COLOR_STOPS
-  if (x <= stops[0]!.dbm) {
+  if (x <= stops[0]!.db) {
     const c = stops[0]!.rgb
     return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
   }
-  if (x >= stops[stops.length - 1]!.dbm) {
+  if (x >= stops[stops.length - 1]!.db) {
     const c = stops[stops.length - 1]!.rgb
     return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
   }
   for (let i = 0; i < stops.length - 1; i++) {
     const lo = stops[i]!
     const hi = stops[i + 1]!
-    if (x >= lo.dbm && x <= hi.dbm) {
-      const t = (x - lo.dbm) / (hi.dbm - lo.dbm)
+    if (x >= lo.db && x <= hi.db) {
+      const t = (x - lo.db) / (hi.db - lo.db)
       return `rgb(${lerpChannel(lo.rgb[0], hi.rgb[0], t)}, ${lerpChannel(lo.rgb[1], hi.rgb[1], t)}, ${lerpChannel(lo.rgb[2], hi.rgb[2], t)})`
     }
   }
@@ -1108,45 +1139,59 @@ function pathLossToColor(pl: number): string {
 
 function pathLossScaleGradientCss(): string {
   const pts = PL_COLOR_STOPS.map((s) => ({
-    pct: ((s.dbm - PROCESS_PL_GOOD) / (PROCESS_PL_BAD - PROCESS_PL_GOOD)) * 100,
-    color: pathLossToColor(s.dbm),
+    pct: ((s.db - PROCESS_PL_GOOD) / (PROCESS_PL_BAD - PROCESS_PL_GOOD)) * 100,
+    color: pathLossToColor(s.db),
   })).sort((a, b) => a.pct - b.pct)
   return `linear-gradient(90deg, ${pts.map((p) => `${p.color} ${p.pct.toFixed(2)}%`).join(', ')})`
 }
 
 const PROCESS_HIST_BIN_WIDTH_DB = 20
 
-type PathLossBinRow = { low: number; high: number; count: number }
+type PathLossBinRow = { low: number; high: number; count: number; seconds: number }
 
-/** Bins aligned to multiples of `binWidthDb` dBm; half-open [low, high). */
-function pathLossHistogramBins(values: number[], binWidthDb: number): PathLossBinRow[] {
-  if (values.length === 0) return []
-  let minV = values[0]!
+/**
+ * Bins aligned to multiples of `binWidthDb` dB; half-open [low, high).
+ * **Seconds:** each interval from sample `i` to `i+1` (from trail timestamps) is added to the bin
+ * containing sample `i`'s path loss (time walking until the next plotted point).
+ */
+function pathLossHistogramBinsFromMerged(points: MergedPlotPoint[], binWidthDb: number): PathLossBinRow[] {
+  if (points.length === 0) return []
+  let minV = points[0]!.pathLoss
   let maxV = minV
-  for (const v of values) {
-    if (v < minV) minV = v
-    if (v > maxV) maxV = v
+  for (const p of points) {
+    if (p.pathLoss < minV) minV = p.pathLoss
+    if (p.pathLoss > maxV) maxV = p.pathLoss
   }
   const w = binWidthDb
   const start = Math.floor(minV / w) * w
   const endExclusive = Math.floor(maxV / w) * w + w
   const nBins = Math.max(1, Math.round((endExclusive - start) / w))
   const counts = new Array<number>(nBins).fill(0)
-  for (const v of values) {
+  const seconds = new Array<number>(nBins).fill(0)
+  for (const p of points) {
+    const v = p.pathLoss
     let i = Math.floor((v - start) / w)
     if (i < 0) i = 0
     else if (i >= nBins) i = nBins - 1
     counts[i]!++
   }
+  for (let i = 0; i < points.length - 1; i++) {
+    const dtSec = Math.max(0, (points[i + 1]!.timeMs - points[i]!.timeMs) / 1000)
+    const v = points[i]!.pathLoss
+    let bi = Math.floor((v - start) / w)
+    if (bi < 0) bi = 0
+    else if (bi >= nBins) bi = nBins - 1
+    seconds[bi]! += dtSec
+  }
   const rows: PathLossBinRow[] = []
   for (let i = 0; i < nBins; i++) {
     const low = start + i * w
-    rows.push({ low, high: low + w, count: counts[i]! })
+    rows.push({ low, high: low + w, count: counts[i]!, seconds: seconds[i]! })
   }
   return rows
 }
 
-function formatDbmBinLabel(low: number, high: number): string {
+function formatPathLossBinLabel(low: number, high: number): string {
   const a = low.toFixed(0)
   const b = high.toFixed(0)
   return `[${a}, ${b})`
@@ -1159,18 +1204,99 @@ function updateProcessHistogramTable(): void {
     processHistogramBody.innerHTML = ''
     return
   }
-  const values = processMergedPoints.map((p) => p.pathLoss)
-  const rows = pathLossHistogramBins(values, PROCESS_HIST_BIN_WIDTH_DB)
+  const rows = pathLossHistogramBinsFromMerged(processMergedPoints, PROCESS_HIST_BIN_WIDTH_DB)
   const total = n
   const parts: string[] = []
   for (const r of rows) {
     const pct = total > 0 ? (100 * r.count) / total : 0
     parts.push(
-      `<tr><td>${formatDbmBinLabel(r.low, r.high)}</td><td>${r.count}</td><td>${pct.toFixed(1)}</td></tr>`,
+      `<tr><td>${formatPathLossBinLabel(r.low, r.high)}</td><td>${r.count}</td><td>${r.seconds.toFixed(1)}</td><td>${pct.toFixed(1)}</td></tr>`,
     )
   }
   processHistogramBody.innerHTML = parts.join('')
   processHistogramWrap.hidden = false
+}
+
+function fillFsplSelectOptions(): void {
+  processFsplRef.innerHTML = ''
+  for (const m of fsplMeasuredFrequencyOptionsMhz()) {
+    const opt = document.createElement('option')
+    opt.value = String(m)
+    opt.textContent = m === 2474 ? `${m} (≈ ch 14)` : String(m)
+    processFsplRef.appendChild(opt)
+  }
+  processFsplTarget.innerHTML = ''
+  for (const m of fsplDisplayFrequencyOptionsMhz()) {
+    const opt = document.createElement('option')
+    opt.value = String(m)
+    opt.textContent = String(m)
+    processFsplTarget.appendChild(opt)
+  }
+  processFsplRef.value = '2474'
+  processFsplTarget.value = '1800'
+}
+
+function updateProcessFsplDeltaLabel(): void {
+  if (processMergedPointsRaw.length === 0) {
+    processFsplDelta.textContent = ''
+    return
+  }
+  const fMeas = Number(processFsplRef.value)
+  const fEst = Number(processFsplTarget.value)
+  if (!processFsplEnable.checked) {
+    processFsplDelta.textContent = 'Scaling off — measured values as in CSV.'
+    return
+  }
+  if (!Number.isFinite(fMeas) || !Number.isFinite(fEst) || fMeas <= 0 || fEst <= 0) {
+    processFsplDelta.textContent = ''
+    return
+  }
+  const d = fsplPathLossDeltaDb(fEst, fMeas)
+  const ad = Math.abs(d)
+  const neg = fsplPathLossNegativeConvention(processMergedPointsRaw)
+  const negNote = neg ? ' CSV uses negative path loss — scaled so lower f → less loss (less negative).' : ''
+  if (d < 0) {
+    processFsplDelta.textContent = `At ${fEst} MHz, PL is ~${ad.toFixed(2)} dB lower than at ${fMeas} MHz (free space).${negNote}`
+  } else if (d > 0) {
+    processFsplDelta.textContent = `At ${fEst} MHz, PL is ~${ad.toFixed(2)} dB higher than at ${fMeas} MHz (free space).${negNote}`
+  } else {
+    processFsplDelta.textContent = 'Same frequency — no change.'
+  }
+}
+
+function rebuildProcessMergedFromFspl(): void {
+  if (processMergedPointsRaw.length === 0) {
+    processMergedPoints = []
+    updateProcessFsplDeltaLabel()
+    return
+  }
+  const fMeas = Number(processFsplRef.value)
+  const fEst = Number(processFsplTarget.value)
+  const use =
+    processFsplEnable.checked &&
+    Number.isFinite(fMeas) &&
+    Number.isFinite(fEst) &&
+    fMeas > 0 &&
+    fEst > 0
+  const deltaRaw = use ? fsplPathLossDeltaDb(fEst, fMeas) : 0
+  const negConv = fsplPathLossNegativeConvention(processMergedPointsRaw)
+  const delta = negConv ? -deltaRaw : deltaRaw
+  processMergedPoints = processMergedPointsRaw.map((p) => ({
+    ...p,
+    pathLoss: p.pathLoss + delta,
+  }))
+  updateProcessFsplDeltaLabel()
+}
+
+function updateProcessFsplChrome(): void {
+  const has = processMergedPointsRaw.length > 0
+  processFsplWrap.hidden = !has
+  processFsplEnable.disabled = !has
+  processFsplRef.disabled = !has
+  processFsplTarget.disabled = !has
+  if (!has) {
+    processFsplDelta.textContent = ''
+  }
 }
 
 function updateProcessFileSummary(): void {
@@ -1187,9 +1313,12 @@ function clearProcessTrailState(): void {
   processTrailOriginal = []
   processWalkTestDate = null
   processMergedPoints = []
+  processMergedPointsRaw = []
   processTrailDragIndex = null
   processNudgeTrail.checked = false
   processNudgeSnap.value = 'off'
+  updateProcessFsplChrome()
+  processFsplDelta.textContent = ''
 }
 
 function processTrailPixelsDirty(): boolean {
@@ -1273,6 +1402,8 @@ function onTrailPointerDown(e: PointerEvent): void {
   if (i === null) return
   e.preventDefault()
   processMergedPoints = []
+  processMergedPointsRaw = []
+  updateProcessFsplChrome()
   processTrailDragIndex = i
   processCanvas.setPointerCapture(e.pointerId)
   updateProcessTrailChrome()
@@ -1399,6 +1530,8 @@ function onTrailPointerMove(e: PointerEvent): void {
   const cur = processTrailEditable[idx]!
   processTrailEditable[idx] = { ...cur, x: c.x, y: c.y }
   processMergedPoints = []
+  processMergedPointsRaw = []
+  updateProcessFsplChrome()
   drawProcessOverlay()
   e.preventDefault()
 }
@@ -1563,7 +1696,7 @@ function drawProcessOverlay(): void {
       for (const pt of processMergedPoints) {
         const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
         if (!q) continue
-        const text = `${pt.pathLoss.toFixed(1)} dBm`
+        const text = `${pt.pathLoss.toFixed(1)} dB`
         const lx = q.x + labelDx
         const ly = q.y
         ctx.lineWidth = Math.max(2, fontPx * 0.22)
@@ -1577,14 +1710,19 @@ function drawProcessOverlay(): void {
     const nUser = processMergedPoints.length - nInterp
     const walkTypesLegend =
       nUser > 0 || nInterp > 0
-        ? `<span>Walk: <strong>${nUser}</strong> original <span class="process-legend-user-ring" title="Original (non-interpolated) points — grey ring; fill is still path loss (dBm)."></span> · <strong>${nInterp}</strong> interpolated (no ring)</span>`
+        ? `<span>Walk: <strong>${nUser}</strong> original <span class="process-legend-user-ring" title="Original (non-interpolated) points — grey ring; fill is still path loss (dB)."></span> · <strong>${nInterp}</strong> interpolated (no ring)</span>`
         : ''
     processLegend.hidden = false
+    const fsplLegend =
+      processMergedPointsRaw.length > 0 && processFsplEnable.checked
+        ? `<span>FSPL: estimated at <strong>${processFsplTarget.value}</strong> MHz (walk at <strong>${processFsplRef.value}</strong> MHz, free space)</span>`
+        : ''
     processLegend.innerHTML = `<div class="process-legend-inner">
-    <span>Color scale <strong>−30</strong> … <strong>−100</strong> dBm (outside range is clamped)</span>
+    <span>Color scale <strong>−30</strong> … <strong>−100</strong> dB (outside range is clamped)</span>
     <span class="process-legend-gradient" style="background:${pathLossScaleGradientCss()}"></span>
     ${walkTypesLegend}
-    <span>${processMergedPoints.length} pts · data <strong>${minPl.toFixed(1)}</strong>–<strong>${maxPl.toFixed(1)}</strong> dBm</span>
+    ${fsplLegend}
+    <span>${processMergedPoints.length} pts · data <strong>${minPl.toFixed(1)}</strong>–<strong>${maxPl.toFixed(1)}</strong> dB</span>
   </div>`
     updateProcessHistogramTable()
     updateProcessTrailChrome()
@@ -1727,6 +1865,8 @@ function runProcessPlot(): void {
         processStatus.textContent =
           'Walkplotter CSV has no # test_date_local: YYYY-MM-DD header — cannot align times.'
         processMergedPoints = []
+        processMergedPointsRaw = []
+        updateProcessFsplChrome()
         drawProcessOverlay()
         return
       }
@@ -1735,21 +1875,31 @@ function runProcessPlot(): void {
         processStatus.textContent =
           'No path loss rows found (expect HH:MM:SS first field, 4th field = number).'
         processMergedPoints = []
+        processMergedPointsRaw = []
+        updateProcessFsplChrome()
         drawProcessOverlay()
         return
       }
       const trailForMerge: WalkplotterTrailRow[] = processTrailEditable
-      processMergedPoints = mergeByNearestTime(testDate, trailForMerge, plRows, DEFAULT_MAX_MATCH_MS)
-      if (!processMergedPoints.length) {
+      const merged = mergeByNearestTime(testDate, trailForMerge, plRows, DEFAULT_MAX_MATCH_MS)
+      if (!merged.length) {
+        processMergedPoints = []
+        processMergedPointsRaw = []
+        updateProcessFsplChrome()
         processStatus.textContent = `No points matched within ${DEFAULT_MAX_MATCH_MS / 1000}s — check times and date (${testDate}).`
         drawProcessOverlay()
         return
       }
+      processMergedPointsRaw = merged.map((p) => ({ ...p }))
+      rebuildProcessMergedFromFspl()
+      updateProcessFsplChrome()
       processStatus.textContent = `Matched ${processMergedPoints.length} of ${processTrailEditable.length} trail samples to nearest RF reading (date ${testDate}).`
       drawProcessOverlay()
     } catch (e) {
       processStatus.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`
       processMergedPoints = []
+      processMergedPointsRaw = []
+      updateProcessFsplChrome()
       drawProcessOverlay()
     }
   })()
@@ -2053,6 +2203,8 @@ processFileWalk.addEventListener('change', () => {
   void (async () => {
     updateProcessFileSummary()
     processMergedPoints = []
+    processMergedPointsRaw = []
+    updateProcessFsplChrome()
     processTrailDragIndex = null
     processNudgeTrail.checked = false
     const f = processFileWalk.files?.[0]
@@ -2115,6 +2267,21 @@ processImg.addEventListener('load', () => {
 processBtnPlot.addEventListener('click', () => runProcessPlot())
 processBtnClearPlot.addEventListener('click', () => {
   processMergedPoints = []
+  processMergedPointsRaw = []
+  updateProcessFsplChrome()
+  processFsplDelta.textContent = ''
+  drawProcessOverlay()
+})
+processFsplEnable.addEventListener('change', () => {
+  rebuildProcessMergedFromFspl()
+  drawProcessOverlay()
+})
+processFsplRef.addEventListener('change', () => {
+  rebuildProcessMergedFromFspl()
+  drawProcessOverlay()
+})
+processFsplTarget.addEventListener('change', () => {
+  rebuildProcessMergedFromFspl()
   drawProcessOverlay()
 })
 processShowPlLabels.addEventListener('change', () => drawProcessOverlay())
@@ -2128,6 +2295,9 @@ processNudgeSnap.addEventListener('change', () => drawProcessOverlay())
 processResetTrail.addEventListener('click', () => {
   processTrailEditable = processTrailOriginal.map((r) => ({ ...r }))
   processMergedPoints = []
+  processMergedPointsRaw = []
+  updateProcessFsplChrome()
+  processFsplDelta.textContent = ''
   drawProcessOverlay()
 })
 processSaveWalkEdited.addEventListener('click', () => downloadProcessWalkCsv('edited'))
@@ -2578,5 +2748,6 @@ ro.observe(stageInner)
 syncInterpControl()
 syncPinSizeControl()
 syncColorPickersFromCss()
+fillFsplSelectOptions()
 updateChrome()
 void loadDefaultFloorPlan()

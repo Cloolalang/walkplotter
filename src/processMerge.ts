@@ -25,6 +25,8 @@ export type MergedPlotPoint = {
   pathLoss: number
   /** Walkplotter trail `source` column (e.g. `user` vs `interpolated`). */
   source: string
+  /** Local time for this sample (ms since epoch), for histogram time-in-bin. */
+  timeMs: number
 }
 
 const DATE_RE = /^#\s*test_date_local:\s*(\d{4}-\d{2}-\d{2})\s*$/i
@@ -254,7 +256,7 @@ export function mergeByNearestTime(
       }
     }
     if (bestD <= maxDeltaMs) {
-      out.push({ x: row.x, y: row.y, pathLoss: best.pl, source: row.source })
+      out.push({ x: row.x, y: row.y, pathLoss: best.pl, source: row.source, timeMs: t })
     }
   }
   return out
