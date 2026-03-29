@@ -2,7 +2,7 @@
 
 A small **offline-friendly** web app for walking a path on a floor plan: drop **trail** pins with timestamps, add **points of interest markers (POI markers)**—labeled pins not on the trail—pinch-zoom and pan, then export **CSV** (and optional map snapshot **JPG**). Built with **Vite** and **TypeScript**; runs in the browser with no backend.
 
-**Typical use case:** **uplink signal coverage walk testing** alongside [**dBm-Now**](https://github.com/Cloolalang/dBm-Now-), an ESP-NOW path-loss / RSSI project. You walk the indoor coverage area with a **signal source** while Walkplotter records your **route on a floor plan** with timestamps; a **transponder** elsewhere receives the signal and logs **levels with timestamps** (for example via Serial CSV). **Post-processing the two timestamped CSV files** lets you align path and measurements to build **uplink coverage plots** for **in-building DAS** commissioning and design.
+**Typical use case:** **uplink signal coverage walk testing** alongside [**dBm-Now**](https://github.com/Cloolalang/dBm-Now-), an ESP-NOW path-loss / RSSI project. You walk the indoor coverage area with a **signal source** while Walkplotter records your **route on a floor plan** with timestamps; a **transponder** elsewhere receives the signal and logs **levels with timestamps** (for example via Serial CSV). **Post-processing the two timestamped CSV files** lets you align path and measurements to build **uplink coverage plots** for **in-building DAS** commissioning and design. As of **version 2.0**, the in-browser **Process** tab can load your Walkplotter export and path-loss log, match them by time, and **plot path loss on the floor plan** (plus a histogram and optional numeric labels)—no spreadsheet required for a first look.
 
 ![Walkplotter on a floor plan: trail pins with path, POI markers, and the Map / Controls UI](example.jpg)
 
@@ -13,8 +13,9 @@ A small **offline-friendly** web app for walking a path on a floor plan: drop **
 - Load a floor plan image; trail and POI markers are stored in **image pixel** coordinates.
 - **Trail** mode records taps with local time; optional interpolation along straight segments when taps are more than 1 second apart.
 - **POI** mode for separate labeled pins (anything you want to mark on the map without a timestamp); optional second CSV export (pixels only, no timestamps).
-- **Map** / **Controls** tabs for a large map view vs. tools.
+- **Map** / **Controls** / **Process** tabs: large map, tools and export, and **post-processing** (path loss on the floor plan).
 - Pin size, crosshairs, pause/resume, undo, CSV download.
+- **Process** tab: load floor plan + Walkplotter CSV + path-loss CSV; join by nearest time; fixed **−30…−100 dBm** color scale, **20 dB histogram**, optional **point labels**.
 
 ---
 
@@ -22,7 +23,7 @@ A small **offline-friendly** web app for walking a path on a floor plan: drop **
 
 ### Open the app
 
-Run the dev server (`npm run dev`) and open the URL shown in the terminal, or serve the **`dist/`** folder after `npm run build` (see **Setup on a computer** and **Android smartphone** below). The UI has two tabs: **Map** (full map) and **Controls** (tools and export).
+Run the dev server (`npm run dev`) and open the URL shown in the terminal, or serve the **`dist/`** folder after `npm run build` (see **Setup on a computer** and **Android smartphone** below). The UI has three tabs: **Map** (full map), **Controls** (tools and export), and **Process** (combine trail and path-loss data on a plan).
 
 ### Load a floor plan
 
@@ -61,6 +62,24 @@ Run the dev server (`npm run dev`) and open the URL shown in the terminal, or se
 
 - If you have a **trail**, you name the **trail CSV** first. Trail and POI can live in that single file; a **separate POI CSV** is **optional** and is **off by default**—turn it on only if you want that extra file.
 - If you have **only POIs** (no trail pins), there is no trail CSV field. Choose whether to **save POI markers as CSV** and/or a **JPG**; you must enable **at least one** of those (or cancel).
+
+### Process tab (path loss on the floor plan)
+
+Use this after you have a **Walkplotter trail CSV** (from **Download CSV** or **Stop & save…**) and a separate **path-loss log** as CSV from your receiver/tooling (e.g. Serial export). All processing stays in the browser.
+
+1. Open the **Process** tab.
+2. Choose three files:
+   - **Floor plan** — the **same** image you used for the walk (trail `x,y` pixels refer to this image).
+   - **Walkplotter CSV** — your exported file; it must include the header line `# test_date_local: YYYY-MM-DD` so times can be aligned to a calendar day.
+   - **Path loss CSV** — comma-separated rows: **column 1** = time of day as `HH:MM:SS` (same local day as `test_date_local`), **column 4** = path loss value (dBm). Lines starting with `#` are ignored.
+3. Tap **Plot path loss**. The app matches **each trail sample** to the **nearest** path-loss row in time (same date). A match is kept only if the time difference is **at most 3 seconds**; otherwise that trail point is skipped. If nothing matches, check clocks, date, and CSV formats.
+4. **Map**: each matched point is drawn on the plan at the trail coordinates, colored by path loss on a fixed scale from **−30 dBm** (best, light blue) through greens/yellows/oranges/reds toward **−70 dBm**, then **greys** for **−90 dBm** and below, down to **−100 dBm** (values outside that range are **clamped** for color only).
+5. **Histogram** — a table appears under the legend: **20 dB bins**, counts, and percentages for the current plotted set (bins follow the min/max of your data).
+6. **Point labels** — optional checkbox: show **dBm** next to each dot (helpful for screenshots; crowded if many points overlap).
+
+Selected file **names** are listed under the buttons so you can confirm what is loaded.
+
+**Summary:** maximum tolerated **timestamp offset** between a trail row and the path-loss row used for it is **3 seconds** (nearest-neighbor within that window).
 
 ### Tips
 

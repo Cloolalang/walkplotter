@@ -14,7 +14,7 @@ export type ImageMeta = {
 }
 
 const APP_NAME = 'walkplotter'
-const EXPORT_VERSION = 1
+const EXPORT_VERSION = 2
 
 /** Calendar date in local timezone: YYYY-MM-DD */
 export function formatLocalDateYMD(d: Date): string {

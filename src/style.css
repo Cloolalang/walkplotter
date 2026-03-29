@@ -152,6 +152,18 @@ body {
   margin-bottom: 0;
 }
 
+.map-quick-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.12);
+  flex-shrink: 0;
+}
+
 .interp-bar {
   display: flex;
   flex-direction: column;
@@ -504,4 +516,208 @@ body {
 
 .empty[hidden] {
   display: none;
+}
+
+.tab-panel--process {
+  min-height: 0;
+}
+
+.process-hint code {
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.process-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.process-toolbar .toolbar-toggle {
+  flex-shrink: 0;
+}
+
+/* Primary action: distinct from file-picker labels in the same row */
+.process-toolbar .process-btn-run {
+  margin-left: 2px;
+  padding: 11px 18px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #061210;
+  background: linear-gradient(165deg, #4df0c4 0%, #22c995 42%, #15805a 100%);
+  border-color: rgba(180, 255, 220, 0.45);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.2) inset,
+    0 3px 14px rgba(46, 230, 166, 0.38);
+}
+
+.process-toolbar .process-btn-run:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.process-toolbar .process-btn-run:active:not(:disabled) {
+  filter: brightness(0.97);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.12) inset,
+    0 2px 8px rgba(46, 230, 166, 0.28);
+}
+
+.process-files-summary {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.process-file-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+}
+
+.process-file-kind {
+  flex: 0 0 8.5rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.process-file-name {
+  flex: 1 1 12rem;
+  min-width: 0;
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
+}
+
+.process-file-btn {
+  flex-shrink: 0;
+}
+
+.process-status {
+  margin: 0;
+}
+
+.process-legend {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.process-legend-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.process-legend-gradient {
+  display: inline-block;
+  height: 10px;
+  min-width: 120px;
+  flex: 1 1 140px;
+  max-width: 280px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.process-histogram-wrap {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.process-histogram-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.process-histogram-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.process-histogram-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.process-histogram-table th,
+.process-histogram-table td {
+  padding: 6px 10px;
+  text-align: right;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.process-histogram-table th:first-child,
+.process-histogram-table td:first-child {
+  text-align: left;
+}
+
+.process-histogram-table thead th {
+  font-weight: 600;
+  color: var(--text);
+  border-bottom-color: rgba(255, 255, 255, 0.14);
+}
+
+.process-histogram-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.process-stage-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.process-stage {
+  position: relative;
+  width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #0f1c19;
+  display: none;
+}
+
+.process-stage.has-image {
+  display: block;
+}
+
+.process-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: calc(100svh - 320px);
+  object-fit: contain;
+  user-select: none;
+  pointer-events: none;
+}
+
+.process-stage canvas {
+  position: absolute;
+  pointer-events: none;
+}
+
+.process-placeholder {
+  margin: 16px 0;
 }
