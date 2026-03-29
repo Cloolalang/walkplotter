@@ -166,6 +166,21 @@ npm run build
 
 Output is in the **`dist/`** folder. That folder is what you copy to the phone for offline use (see below).
 
+### GitHub Pages (latest build without your PC)
+
+The **`dist/`** folder is **not** committed to this repo (it is listed in `.gitignore`). Instead, a **GitHub Actions** workflow (`.github/workflows/pages.yml`) runs on every push to **`main`**: it runs `npm ci` and `npm run build`, then publishes the resulting **`dist/`** to **GitHub Pages**.
+
+**One-time setup (repository owner):**
+
+1. On GitHub: **Settings** → **Pages** → **Build and deployment** → **Source**: choose **GitHub Actions** (not “Deploy from a branch”).
+2. Push to **`main`** (or run the workflow manually under **Actions**). After the first successful **Deploy to GitHub Pages** run, the site is available at:
+
+   **`https://Cloolalang.github.io/walkplotter/`**
+
+   (replace `Cloolalang` / `walkplotter` if the user or repo name differs.)
+
+3. On Android, open that URL in **Chrome** while online to use the **latest** build. Bookmark or **Add to Home screen** for quick access. This needs **internet** when you open or refresh the page; it does **not** replace copying **`dist/`** for fully offline use on the device.
+
 ---
 
 ## Android smartphone: offline use with **Simple HTTP Server** + **Chrome**
