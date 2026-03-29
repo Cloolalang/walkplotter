@@ -467,7 +467,22 @@ function onPointerTapTrail(clientX: number, clientY: number): void {
   if (!img.naturalWidth || !recording) return
   const hit = clientToImagePixel(clientX, clientY, img)
   if (!hit.ok) return
-  trail.userTap(hit.pixel.x, hit.pixel.y, new Date())
+  const iw = img.naturalWidth
+  const ih = img.naturalHeight
+  let x = hit.pixel.x
+  let y = hit.pixel.y
+  const snapVal = mapTrailSnap.value
+  if (snapVal !== 'off') {
+    const prev = trail.getLastUserAnchor()
+    if (prev) {
+      const deg = snapVal === '90' ? 90 : 45
+      const snapped = nudgeSnapFromPrevOnly(prev, { x, y }, deg)
+      const c = clampPixelToImage(snapped.x, snapped.y, iw, ih)
+      x = c.x
+      y = c.y
+    }
+  }
+  trail.userTap(x, y, new Date())
   redraw()
 }
 
@@ -493,6 +508,14 @@ app.innerHTML = `
     <div class="map-quick-bar" id="map-quick-bar" hidden>
       <button type="button" class="btn" id="btn-pause" disabled>Pause</button>
       <button type="button" class="btn" id="btn-undo" disabled>Undo trail</button>
+      <label class="map-snap-wrap" title="Snap each new trail segment to 90° or 45° steps from the previous pin (same idea as Process nudge snap)">
+        <span class="map-snap-label">Snap angles</span>
+        <select id="map-trail-snap" class="map-trail-snap" disabled>
+          <option value="off" selected>Off</option>
+          <option value="90">90°</option>
+          <option value="45">45°</option>
+        </select>
+      </label>
     </div>
     <div class="map-session-bar" id="map-session-bar" hidden>
       <button type="button" class="btn btn-session-t0" id="btn-session-t0" disabled title="Press when you zero tester and transponder clocks; CSV timestamps export as elapsed time (H:MM:SS) from this instant">
@@ -786,6 +809,7 @@ const placeholder = document.querySelector<HTMLParagraphElement>('#placeholder')
 const stage = document.querySelector<HTMLDivElement>('#stage')!
 const stageInner = document.querySelector<HTMLDivElement>('#stage-inner')!
 const mapQuickBar = document.querySelector<HTMLDivElement>('#map-quick-bar')!
+const mapTrailSnap = document.querySelector<HTMLSelectElement>('#map-trail-snap')!
 const mapSessionBar = document.querySelector<HTMLDivElement>('#map-session-bar')!
 const btnSessionT0 = document.querySelector<HTMLButtonElement>('#btn-session-t0')!
 const btnSessionT0Clear = document.querySelector<HTMLButtonElement>('#btn-session-t0-clear')!
@@ -2082,6 +2106,7 @@ function updateChrome(): void {
   pinSizeRange.disabled = !hasMap
   colorTrail.disabled = !hasMap
   colorPin.disabled = !hasMap
+  mapTrailSnap.disabled = !hasMap || placementMode === 'poi'
 
   if (!hasMap) {
     hintMain.textContent =

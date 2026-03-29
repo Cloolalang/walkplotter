@@ -64,6 +64,11 @@ export class TrailModel {
     this.lastUser = null
   }
 
+  /** Previous user anchor in the current segment (for map snap); null after a break or before any tap. */
+  getLastUserAnchor(): { x: number; y: number } | null {
+    return this.lastUser ? { x: this.lastUser.x, y: this.lastUser.y } : null
+  }
+
   getInterpolationStepMs(): number {
     return this.interpolationStepMs
   }
