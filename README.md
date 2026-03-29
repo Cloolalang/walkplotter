@@ -10,7 +10,7 @@ A small **offline-friendly** web app for walking a path on a floor plan: drop **
 
 ## Features (short)
 
-- Load a floor plan image; trail and POI markers are stored in **image pixel** coordinates.
+- Load a floor plan image; trail and POI markers are stored in **image pixel** coordinates. **Recent plans** on **Controls** reopens the last images from **IndexedDB** (no second file pick, within size/count limits).
 - **Trail** mode records taps with local time; optional interpolation along straight segments when taps are more than 1 second apart.
 - **POI** mode for separate labeled pins (anything you want to mark on the map without a timestamp); optional second CSV export (pixels only, no timestamps).
 - **Map** / **Controls** / **Process** tabs: large map, tools and export, and **post-processing** (path loss on the floor plan).
@@ -31,7 +31,8 @@ Run the dev server (`npm run dev`) and open the URL shown in the terminal, or se
 
 1. Open the **Controls** tab.
 2. Tap **Choose floor plan** and pick an image (or use your project’s default test image if configured).
-3. Return to **Map** to work on the image. Taps **on the image** count; taps on the letterboxed area outside the image are ignored.
+3. **Recent plans:** After you open an image from disk (Map **Choose floor plan**, drag-and-drop on the map, or **Process → Floor plan**), Walkplotter stores up to **eight** copies in the browser (**IndexedDB**, hashed by file content; max about **25 MB** per file—larger images are not kept). Under **Recent plans** on **Controls**, tap a name to load that plan again on the **Map** (clears trail and POIs like a new file pick). **×** removes an entry from the list only (not from disk). Clearing site data removes recents. The bundled `floorimage.jpg` default is **not** added automatically.
+4. Return to **Map** to work on the image. Taps **on the image** count; taps on the letterboxed area outside the image are ignored.
 
 ### Trail mode (walked path with timestamps)
 

@@ -29,6 +29,13 @@ import type {
   UnmatchedTrailPoint,
   WalkplotterTrailRow,
 } from './processMerge'
+import {
+  listRecentFloorPlansMeta,
+  loadRecentFloorPlanBlob,
+  rememberFloorPlanFile,
+  removeRecentFloorPlan,
+  touchRecentFloorPlan,
+} from './recentFloorPlans'
 import { buildPoiOnlyCsv, formatDurationMsAsHMS, formatLocalTimeHMS, TrailModel } from './trail'
 import type { ImageMeta } from './trail'
 import type { PoiMarker, TrailPoint } from './types'
@@ -300,17 +307,17 @@ function exportMapSnapshotJpeg(filename: string): void {
 /** Bundled test plan: place or replace `public/floorimage.jpg` (e.g. copy your `test floorimage.jpg` there). */
 const DEFAULT_FLOOR_IMAGE = `${import.meta.env.BASE_URL}floorimage.jpg`
 
-function setImageFromFile(file: File | null): void {
-  if (!file || !file.type.startsWith('image/')) return
+function applyMapFloorPlanBlob(blob: Blob, fileName: string): void {
+  if (!blob.type.startsWith('image/')) return
   if (objectUrl) {
     URL.revokeObjectURL(objectUrl)
     objectUrl = null
   }
-  objectUrl = URL.createObjectURL(file)
+  objectUrl = URL.createObjectURL(blob)
   resetMapView()
   img.src = objectUrl
   imageMeta = {
-    fileName: file.name || 'unknown',
+    fileName: fileName || 'unknown',
     widthPx: 0,
     heightPx: 0,
   }
@@ -320,6 +327,12 @@ function setImageFromFile(file: File | null): void {
   recording = true
   setTab('map')
   redraw()
+}
+
+function setImageFromFile(file: File | null): void {
+  if (!file || !file.type.startsWith('image/')) return
+  void rememberFloorPlanFile(file).then(() => refreshRecentFloorPlansUi())
+  applyMapFloorPlanBlob(file, file.name || 'unknown')
 }
 
 async function loadDefaultFloorPlan(): Promise<void> {
@@ -586,6 +599,10 @@ app.innerHTML = `
         Crosshairs
       </label>
     </header>
+    <div class="recent-floor-plans" id="recent-floor-plans-wrap" hidden>
+      <span class="recent-floor-plans-label">Recent plans</span>
+      <ul class="recent-floor-plans-list" id="recent-floor-plans-list" aria-label="Recently opened floor plans"></ul>
+    </div>
     <div class="interp-bar" id="interp-bar">
       <label class="interp-label" for="interp-step">Interpolation step (seconds)</label>
       <input
@@ -868,6 +885,8 @@ app.innerHTML = `
 const img = document.querySelector<HTMLImageElement>('#plan')!
 const canvas = document.querySelector<HTMLCanvasElement>('#overlay')!
 const fileInput = document.querySelector<HTMLInputElement>('#file')!
+const recentFloorPlansWrap = document.querySelector<HTMLDivElement>('#recent-floor-plans-wrap')!
+const recentFloorPlansList = document.querySelector<HTMLUListElement>('#recent-floor-plans-list')!
 const btnPause = document.querySelector<HTMLButtonElement>('#btn-pause')!
 const btnStop = document.querySelector<HTMLButtonElement>('#btn-stop')!
 const btnDownload = document.querySelector<HTMLButtonElement>('#btn-download')!
@@ -2710,6 +2729,65 @@ window.addEventListener('resize', () => {
   drawProcessOverlay()
 })
 
+function formatRecentPlanWhen(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return ''
+  }
+}
+
+async function refreshRecentFloorPlansUi(): Promise<void> {
+  const meta = await listRecentFloorPlansMeta()
+  recentFloorPlansList.replaceChildren()
+  if (meta.length === 0) {
+    recentFloorPlansWrap.hidden = true
+    return
+  }
+  recentFloorPlansWrap.hidden = false
+  for (const m of meta) {
+    const li = document.createElement('li')
+    li.className = 'recent-floor-plans-item'
+    const pick = document.createElement('button')
+    pick.type = 'button'
+    pick.className = 'btn recent-floor-plans-pick'
+    const shortName = m.fileName.length > 36 ? `${m.fileName.slice(0, 34)}…` : m.fileName
+    pick.textContent = shortName
+    pick.title = `${m.fileName}\nOpened: ${formatRecentPlanWhen(m.savedAt)}`
+    pick.addEventListener('click', () => void pickRecentFloorPlan(m.key))
+    const rm = document.createElement('button')
+    rm.type = 'button'
+    rm.className = 'btn recent-floor-plans-remove'
+    rm.setAttribute('aria-label', `Remove ${m.fileName} from recent plans`)
+    rm.title = 'Remove from list'
+    rm.textContent = '×'
+    rm.addEventListener('click', (e) => {
+      e.stopPropagation()
+      void removeRecentFloorPlan(m.key).then(() => refreshRecentFloorPlansUi())
+    })
+    li.appendChild(pick)
+    li.appendChild(rm)
+    recentFloorPlansList.appendChild(li)
+  }
+}
+
+async function pickRecentFloorPlan(key: string): Promise<void> {
+  const got = await loadRecentFloorPlanBlob(key)
+  if (!got) {
+    await refreshRecentFloorPlansUi()
+    return
+  }
+  await touchRecentFloorPlan(key)
+  applyMapFloorPlanBlob(got.blob, got.fileName)
+  await refreshRecentFloorPlansUi()
+  updateChrome()
+}
+
 fileInput.addEventListener('change', () => {
   const f = fileInput.files?.[0] ?? null
   setImageFromFile(f)
@@ -2757,6 +2835,7 @@ processFilePlan.addEventListener('change', () => {
     updateProcessFileSummary()
     return
   }
+  void rememberFloorPlanFile(f).then(() => refreshRecentFloorPlansUi())
   processPlanObjectUrl = URL.createObjectURL(f)
   processImg.src = processPlanObjectUrl
   updateProcessFileSummary()
@@ -3405,3 +3484,4 @@ fillFsplSelectOptions()
 initProcessPlColourScale()
 updateChrome()
 void loadDefaultFloorPlan()
+void refreshRecentFloorPlansUi()

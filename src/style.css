@@ -310,6 +310,71 @@ body {
   cursor: not-allowed;
 }
 
+.recent-floor-plans {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 12px;
+  margin: 10px 0 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.recent-floor-plans-label {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  padding-top: 6px;
+}
+
+.recent-floor-plans-list {
+  flex: 1 1 200px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.recent-floor-plans-item {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  max-width: 100%;
+}
+
+.recent-floor-plans-pick {
+  font-size: 13px;
+  padding: 7px 10px;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 8px 0 0 8px;
+}
+
+.recent-floor-plans-remove {
+  flex-shrink: 0;
+  padding: 7px 10px;
+  min-width: 2.25rem;
+  font-size: 1.1rem;
+  line-height: 1;
+  border-radius: 0 8px 8px 0;
+  margin-left: -1px;
+  border-left-color: transparent;
+  color: var(--muted);
+}
+
+.recent-floor-plans-remove:hover {
+  color: var(--danger);
+  border-left-color: rgba(255, 255, 255, 0.14);
+}
+
 .mode-switch {
   display: inline-flex;
   border-radius: 10px;
