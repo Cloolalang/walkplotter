@@ -10,7 +10,7 @@ A small **offline-friendly** web app for walking a path on a floor plan: drop **
 
 ## Features (short)
 
-- Load a floor plan image; trail and POI markers are stored in **image pixel** coordinates. **Recent plans** on **Controls** reopens the last images from **IndexedDB** (no second file pick, within size/count limits).
+- Load a floor plan image; trail and POI markers are stored in **image pixel** coordinates. **Recent plans** on **Controls** reopens the last images from **IndexedDB** (no second file pick, within size/count limits). Optional **GitHub Pages** deploy (see **Setup on a computer**) serves the latest **`dist/`** at a **`github.io`** URL for use on a phone without copying files from a PC (needs internet).
 - **Trail** mode records taps with local time; optional interpolation along straight segments when taps are more than 1 second apart.
 - **POI** mode for separate labeled pins (anything you want to mark on the map without a timestamp); optional second CSV export (pixels only, no timestamps).
 - **Map** / **Controls** / **Process** tabs: large map, tools and export, and **post-processing** (path loss on the floor plan).
@@ -166,26 +166,43 @@ npm run build
 
 Output is in the **`dist/`** folder. That folder is what you copy to the phone for offline use (see below).
 
-### GitHub Pages (latest build without your PC)
+### GitHub Pages (latest `dist/` on the phone, no PC copy)
 
-The **`dist/`** folder is **not** committed to this repo (it is listed in `.gitignore`). Instead, a **GitHub Actions** workflow (`.github/workflows/pages.yml`) runs on every push to **`main`**: it runs `npm ci` and `npm run build`, then publishes the resulting **`dist/`** to **GitHub Pages**.
+The **`dist/`** folder is **not** committed to git (see `.gitignore`). The repo includes **`.github/workflows/pages.yml`**, which on every push to **`main`** runs **`npm ci`** and **`npm run build`**, then uploads the built **`dist/`** to **GitHub Pages** so you always get the same output as a local `npm run build`.
 
-**One-time setup (repository owner):**
+**Enable Pages (repository owner — do this once):**
 
-1. On GitHub: **Settings** → **Pages** → **Build and deployment** → **Source**: choose **GitHub Actions** (not “Deploy from a branch”).
-2. Push to **`main`** (or run the workflow manually under **Actions**). After the first successful **Deploy to GitHub Pages** run, the site is available at:
+1. Open the repo on GitHub (e.g. `https://github.com/Cloolalang/walkplotter`).
+2. Go to **Settings** (repo tabs).
+3. Open **Pages** in the left sidebar.
+4. Under **Build and deployment** → **Source**, select **GitHub Actions**.  
+   Do **not** choose “Deploy from a branch” for this project—the static site comes from the workflow artifact, not a `gh-pages` branch.
+5. Save if prompted. The **Deploy to GitHub Pages** workflow will run on the next push to **`main`**, or you can start it manually: **Actions** → **Deploy to GitHub Pages** → **Run workflow**.
 
-   **`https://Cloolalang.github.io/walkplotter/`**
+**After a successful deploy:**
 
-   (replace `Cloolalang` / `walkplotter` if the user or repo name differs.)
+6. Open **Actions** and confirm the latest **Deploy to GitHub Pages** run finished with a green check.
+7. The app is served at the project Pages URL (default pattern):
 
-3. On Android, open that URL in **Chrome** while online to use the **latest** build. Bookmark or **Add to Home screen** for quick access. This needs **internet** when you open or refresh the page; it does **not** replace copying **`dist/`** for fully offline use on the device.
+   **`https://<github-username-or-org>.github.io/<repository-name>/`**
+
+   For this repository that is **`https://Cloolalang.github.io/walkplotter/`** unless you renamed the fork or org.
+
+**On Android (away from your PC):**
+
+8. With **Wi‑Fi or mobile data** on, open that URL in **Chrome**.
+9. You are loading the **latest build from `main`** (after the last successful deploy). Bookmark the page or use **Add to Home screen** (see below)—same steps as for a local URL, but use the `github.io` link.
+10. **Limitation:** You need **internet** to load or hard-refresh the app. This does **not** replace copying **`dist/`** to the phone and using **Simple HTTP Server** for use with **no** network.
+
+If a workflow run fails, check **Actions** logs (usually `npm ci` / TypeScript). Ensure **Settings** → **Actions** → **General** allows workflows to run and that **Pages** still has **Source: GitHub Actions**.
 
 ---
 
 ## Android smartphone: offline use with **Simple HTTP Server** + **Chrome**
 
 Opening `dist/index.html` directly from storage often **fails** in mobile Chrome (modules / security). Serving the folder over **HTTP on the device** avoids that and works **fully offline** after the files are on the phone.
+
+**Online alternative:** To use the newest build **without** copying `dist/` from a PC, first enable **GitHub Pages** (previous subsection) and open your **`https://….github.io/…/`** URL in Chrome when you have internet.
 
 ### 1. Build on your PC
 
@@ -226,12 +243,12 @@ After you change the project on the PC, run `npm run build` again and **replace*
 
 This gives you a one-tap shortcut (usually full-screen Chrome without the address bar after launch).
 
-1. With Walkplotter open in **Chrome** at your `http://127.0.0.1:…` URL.
+1. With Walkplotter open in **Chrome**—either your **local** URL (`http://127.0.0.1:…` with Simple HTTP Server) **or** your **GitHub Pages** URL (`https://….github.io/walkplotter/`).
 2. Open Chrome’s menu (**⋮**).
 3. Choose **Add to Home screen** or **Install app** (wording varies by Chrome version).
 4. Confirm the name and add the icon.
 
-**Note:** The shortcut opens that URL. **Simple HTTP Server** must be running first, or the page will not load—start the server, then tap the home screen icon.
+**Note:** The shortcut always opens **that exact URL**. For **`127.0.0.1`**, start **Simple HTTP Server** before tapping the icon. For **GitHub Pages**, you need **internet** when you open the shortcut.
 
 ---
 
@@ -248,6 +265,39 @@ Some server apps ask for broad storage access so they can read any folder you se
 | `npm run dev`  | Dev server (default port 4173)   |
 | `npm run build`| Typecheck + production `dist/`   |
 | `npm run preview` | Serve `dist/` locally (test) |
+
+---
+
+## Planned features
+
+### Split a long path-loss CSV using Walkplotter exports (**not implemented**)
+
+**Problem.** A **static receiver** often produces **one continuous** path-loss log (timestamps keep increasing) while you complete **several** walk sessions: different floor plans, moves between areas, gaps between walks. Walkplotter saves **one trail CSV per session**. Today you must **manually slice** the master RF file by time to match each trail before using **Process** (spreadsheet filter, script, etc.).
+
+**Idea.** Add a tool in the app (likely on **Process** or **Controls**) that:
+
+1. Loads a **master path-loss CSV** (full receiver run).
+2. Loads **one or more Walkplotter CSVs** already exported for each walk area.
+3. Derives a **time window per walk** from each file’s **trail rows** (min/max timestamp in the file’s stated semantics) plus header metadata where needed: `# test_date_local`, `# timestamp_semantics`, `# session_epoch_ms`, so **wall-clock** and **elapsed** modes stay consistent with the receiver log.
+4. Emits **separate path-loss CSV files** (or a single downloadable archive)—each slice contains RF rows whose times fall inside the corresponding window, optionally with a small configurable **padding** (e.g. ±few seconds) so edge matches behave like **Process** today.
+5. Optionally names outputs to pair with each Walkplotter file (e.g. same basename + `-pathloss-slice.csv`).
+
+**Edge cases to design later:** overlapping walk windows if the same plan is walked twice the same day; receiver lines starting with `#`; RF rows outside every window; very long gaps (no RF during transit).
+
+**Status.** **Planning only**—no implementation in the codebase yet.
+
+### Real-time plotting (MQTT / [**dBm-Now**](https://github.com/Cloolalang/dBm-Now-) two-way mode) (**not implemented**)
+
+**Problem.** **Process** today is **post hoc**: you export a trail CSV and a path-loss log, then merge in the browser. During the walk you see the route but not live RF tied to each step.
+
+**Idea.** Support **live** path-loss (or RSSI) on the map while you walk:
+
+- **MQTT** — subscribe to a broker topic where the receiver (or a bridge) publishes timestamped measurements; Walkplotter **matches** incoming samples to the current trail by time (same clock / session rules as today) and updates markers or a “last known” plot without waiting for CSV export.
+- **dBm-Now two-way mode** — coordinate with [**dBm-Now**](https://github.com/Cloolalang/dBm-Now-) (or compatible tooling) so the phone can **receive** streaming measurements over the same ecosystem the project already targets (**ESP-NOW**, serial, etc.), with a defined message shape and optional **ack** / **control** channel (“two-way”) for session boundaries, rate limits, or health checks.
+
+**Design questions for later:** transport when offline (local broker vs device AP), battery and reconnect behaviour, security (TLS, device pairing), backward compatibility with **CSV-only** workflow, and whether live mode feeds **Process** history or only **Map** preview.
+
+**Status.** **Planning only**—no implementation in the codebase yet.
 
 ---
 
