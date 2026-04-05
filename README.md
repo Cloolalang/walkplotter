@@ -4,7 +4,7 @@ A small **offline-friendly** web app for walking a path on a floor plan: drop **
 
 **Typical use case:** **uplink signal coverage walk testing** alongside [**dBm-Now**](https://github.com/Cloolalang/dBm-Now-), an ESP-NOW path-loss / RSSI project. You walk the indoor coverage area with a **signal source** while Walkplotter records your **route on a floor plan** with timestamps; a **transponder** elsewhere receives the signal and logs **levels with timestamps** (for example via Serial CSV). **Post-processing the two timestamped CSV files** lets you align path and measurements to build **uplink coverage plots** for **in-building DAS** commissioning and design. As of **version 2.5**, the in-browser **Process** tab loads your Walkplotter export and path-loss log, matches them by time, and draws **path-loss–colored** markers and optional **histogram**, **point labels**, thin **route** line, and a **color-coded trail** (continuous ribbon the same width as the markers)—no spreadsheet required for a first look.
 
-![Walkplotter on a floor plan: trail pins with path, POI markers, and the Map / Controls UI](example.jpg)
+![Walkplotter Process tab: path loss on a floor plan with histogram, pie chart, and color-coded trail](dBmNow_example.jpg)
 
 ---
 
