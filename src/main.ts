@@ -19,6 +19,7 @@ import {
   extractWalkplotterTimestampInfo,
   mergeByNearestTime,
   parsePathLossCsv,
+  parseRssiCsv,
   parseWalkplotterEditable,
   serializeWalkplotterEditable,
 } from './processMerge'
@@ -69,6 +70,12 @@ let processMergedPointsRaw: MergedPlotPoint[] = []
 let processUnmatchedTrailPoints: UnmatchedTrailPoint[] = []
 /** Cached path-loss CSV text (set when a file is chosen or a bundle is loaded) for Plot / Save bundle. */
 let processPathLossCsvText = ''
+/** Cached RSSI CSV (`time` + `rssi` columns); merged like path loss but separate colour scale. */
+let processRssiCsvText = ''
+let processRssiMergedPoints: MergedPlotPoint[] = []
+let processRssiUnmatchedTrailPoints: UnmatchedTrailPoint[] = []
+type ProcessPlotMetric = 'path_loss' | 'rssi'
+let processPlotMetric: ProcessPlotMetric = 'path_loss'
 /** When set, file summary labels come from a loaded bundle until the user picks new files. */
 let processBundleSummaryOverride: { plan: string; walk: string; pl: string } | null = null
 /** Walkplotter trail loaded in Process tab; x/y edits are saved via Save Walkplotter CSV. */
@@ -652,8 +659,8 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--process" id="panel-process" role="tabpanel" aria-labelledby="tab-process" hidden>
     <p class="hint process-hint">
-      Load the <strong>floor plan</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss in <strong>dB</strong>, 1st = HH:MM:SS) and <strong>Plot path loss</strong>. Nearest-time match within
-      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>. After plotting, use <strong>Save process bundle</strong> to name and download one JSON file with all three; <strong>Load bundle</strong> restores them with a single file pick (large plans make a large file).
+      Load the <strong>floor plan</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss in <strong>dB</strong>) and/or <strong>RSSI</strong> CSV (columns <code>time</code>, <code>rssi</code> in <strong>dBm</strong>) and tap <strong>Plot overlay</strong>. Nearest-time match within
+      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>. After plotting, use <strong>Save process bundle</strong> to name and download one JSON file with plan, walk, and path loss; <strong>Load bundle</strong> restores them with a single file pick (large plans make a large file).
     </p>
     <div class="process-toolbar">
       <label class="btn btn-primary process-file-btn process-file-pick">
@@ -668,9 +675,20 @@ app.innerHTML = `
         Path loss CSV
         <input id="process-file-pl" type="file" class="process-file-input-overlay" />
       </label>
-      <button type="button" class="btn btn-primary process-btn-run" id="process-btn-plot" title="Merge path loss log with current trail and draw">Plot path loss</button>
-      <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss overlay to edit the trail again">
-        Clear path loss plot
+      <label class="btn btn-primary process-file-btn process-file-pick">
+        RSSI CSV
+        <input id="process-file-rssi" type="file" class="process-file-input-overlay" />
+      </label>
+      <label class="process-metric-wrap" id="process-metric-wrap" hidden>
+        <span class="process-metric-label">Show</span>
+        <select id="process-plot-metric" class="process-metric-select" aria-label="Overlay metric">
+          <option value="path_loss">Path loss</option>
+          <option value="rssi">RSSI</option>
+        </select>
+      </label>
+      <button type="button" class="btn btn-primary process-btn-run" id="process-btn-plot" title="Merge path loss and/or RSSI logs with the trail and draw">Plot overlay</button>
+      <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss / RSSI overlay to edit the trail again">
+        Clear overlay
       </button>
       <button type="button" class="btn" id="process-btn-save-bundle" disabled title="Download one JSON file with floor plan + Walkplotter CSV + path loss CSV">
         Save process bundle
@@ -745,11 +763,15 @@ app.innerHTML = `
         <span class="process-file-kind">Path loss CSV</span>
         <span class="process-file-name" id="process-filename-pl">—</span>
       </div>
+      <div class="process-file-row">
+        <span class="process-file-kind">RSSI CSV</span>
+        <span class="process-file-name" id="process-filename-rssi">—</span>
+      </div>
     </div>
     <p class="hint process-status" id="process-status">Load floor plan and Walkplotter CSV to begin.</p>
     <div class="process-legend" id="process-legend" hidden></div>
     <div class="process-histogram-wrap" id="process-histogram-wrap" hidden>
-      <p class="process-histogram-title">Path loss histogram (20 dB bins, down to −120 dB)</p>
+      <p class="process-histogram-title" id="process-histogram-title">Path loss histogram (20 dB bins, down to −120 dB)</p>
       <details class="process-colour-scale" id="process-colour-scale">
         <summary class="process-colour-scale-summary">Bin &amp; map colour scale</summary>
         <p class="hint process-colour-scale-hint">
@@ -776,7 +798,7 @@ app.innerHTML = `
             <thead>
               <tr>
                 <th scope="col" class="process-hist-col-swatch" aria-label="Bin colour"></th>
-                <th scope="col">Range (dB)</th>
+                <th scope="col" id="process-histogram-range-th">Range (dB)</th>
                 <th scope="col">Count</th>
                 <th scope="col">Seconds</th>
                 <th scope="col">%</th>
@@ -931,6 +953,7 @@ const processBtnZoomReset = document.querySelector<HTMLButtonElement>('#process-
 const processFilePlan = document.querySelector<HTMLInputElement>('#process-file-plan')!
 const processFileWalk = document.querySelector<HTMLInputElement>('#process-file-walk')!
 const processFilePl = document.querySelector<HTMLInputElement>('#process-file-pl')!
+const processFileRssi = document.querySelector<HTMLInputElement>('#process-file-rssi')!
 const processBtnPlot = document.querySelector<HTMLButtonElement>('#process-btn-plot')!
 const processBtnClearPlot = document.querySelector<HTMLButtonElement>('#process-btn-clear-plot')!
 const processBtnSaveBundle = document.querySelector<HTMLButtonElement>('#process-btn-save-bundle')!
@@ -952,8 +975,14 @@ const processStatus = document.querySelector<HTMLParagraphElement>('#process-sta
 const processFilenamePlan = document.querySelector<HTMLSpanElement>('#process-filename-plan')!
 const processFilenameWalk = document.querySelector<HTMLSpanElement>('#process-filename-walk')!
 const processFilenamePl = document.querySelector<HTMLSpanElement>('#process-filename-pl')!
+const processFilenameRssi = document.querySelector<HTMLSpanElement>('#process-filename-rssi')!
+const processMetricWrap = document.querySelector<HTMLLabelElement>('#process-metric-wrap')!
+const processPlotMetricSelect = document.querySelector<HTMLSelectElement>('#process-plot-metric')!
 const processLegend = document.querySelector<HTMLDivElement>('#process-legend')!
 const processHistogramWrap = document.querySelector<HTMLDivElement>('#process-histogram-wrap')!
+const processHistogramTitle = document.querySelector<HTMLParagraphElement>('#process-histogram-title')!
+const processColourScale = document.querySelector<HTMLDetailsElement>('#process-colour-scale')!
+const processHistogramRangeTh = document.querySelector<HTMLTableCellElement>('#process-histogram-range-th')!
 const processHistogramBody = document.querySelector<HTMLTableSectionElement>('#process-histogram-body')!
 const processHistogramPie = document.querySelector<SVGSVGElement>('#process-histogram-pie')!
 const processPlStopsEditor = document.querySelector<HTMLDivElement>('#process-pl-stops-editor')!
@@ -1353,11 +1382,126 @@ function pathLossScaleGradientCss(): string {
   return `linear-gradient(90deg, ${pts.map((p) => `${p.color} ${p.pct.toFixed(2)}%`).join(', ')})`
 }
 
+/** RSSI (dBm): −120 weak (black) → −25 strong (white); blues, green, yellow, orange, red ~−95. */
+const PROCESS_RSSI_GOOD = -25
+const PROCESS_RSSI_BAD = -120
+
+/** One stop every 10 dBm from weak (−120) to strong (−25); map and histogram use the same scale. */
+const RSSI_COLOR_STOPS: readonly { db: number; rgb: readonly [number, number, number] }[] = [
+  { db: -120, rgb: [8, 8, 10] },
+  { db: -110, rgb: [34, 12, 16] },
+  { db: -100, rgb: [72, 20, 24] },
+  { db: -90, rgb: [198, 44, 32] },
+  { db: -80, rgb: [255, 130, 36] },
+  { db: -70, rgb: [255, 215, 52] },
+  { db: -60, rgb: [108, 198, 68] },
+  { db: -50, rgb: [30, 102, 172] },
+  { db: -40, rgb: [64, 138, 230] },
+  { db: -30, rgb: [168, 208, 255] },
+  { db: -25, rgb: [255, 255, 255] },
+]
+
+function rssiToColor(rssi: number): string {
+  const x = Math.max(PROCESS_RSSI_BAD, Math.min(PROCESS_RSSI_GOOD, rssi))
+  const stops = RSSI_COLOR_STOPS
+  if (x <= stops[0]!.db) {
+    const c = stops[0]!.rgb
+    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+  }
+  if (x >= stops[stops.length - 1]!.db) {
+    const c = stops[stops.length - 1]!.rgb
+    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+  }
+  for (let i = 0; i < stops.length - 1; i++) {
+    const lo = stops[i]!
+    const hi = stops[i + 1]!
+    if (x >= lo.db && x <= hi.db) {
+      const t = (x - lo.db) / (hi.db - lo.db)
+      return `rgb(${lerpChannel(lo.rgb[0], hi.rgb[0], t)}, ${lerpChannel(lo.rgb[1], hi.rgb[1], t)}, ${lerpChannel(lo.rgb[2], hi.rgb[2], t)})`
+    }
+  }
+  const c = stops[stops.length - 1]!.rgb
+  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+}
+
+function rssiScaleGradientCss(): string {
+  const pts = RSSI_COLOR_STOPS.map((s) => ({
+    pct: ((s.db - PROCESS_RSSI_GOOD) / (PROCESS_RSSI_BAD - PROCESS_RSSI_GOOD)) * 100,
+    color: rssiToColor(s.db),
+  })).sort((a, b) => a.pct - b.pct)
+  return `linear-gradient(90deg, ${pts.map((p) => `${p.color} ${p.pct.toFixed(2)}%`).join(', ')})`
+}
+
+function rssiBinMidColor(low: number, high: number): string {
+  return rssiToColor((low + high) / 2)
+}
+
+function processMetricIsRssiView(): boolean {
+  return processPlotMetric === 'rssi' && processRssiMergedPoints.length > 0
+}
+
+function getActiveProcessMerged(): MergedPlotPoint[] {
+  return processMetricIsRssiView() ? processRssiMergedPoints : processMergedPoints
+}
+
+function getActiveProcessUnmatched(): UnmatchedTrailPoint[] {
+  return processMetricIsRssiView() ? processRssiUnmatchedTrailPoints : processUnmatchedTrailPoints
+}
+
+function metricValueToColor(v: number): string {
+  return processMetricIsRssiView() ? rssiToColor(v) : pathLossToColor(v)
+}
+
+function metricScaleGradientCss(): string {
+  return processMetricIsRssiView() ? rssiScaleGradientCss() : pathLossScaleGradientCss()
+}
+
+function processHasPlOverlay(): boolean {
+  return processMergedPoints.length > 0 || processUnmatchedTrailPoints.length > 0
+}
+
+function processHasRssiOverlay(): boolean {
+  return processRssiMergedPoints.length > 0 || processRssiUnmatchedTrailPoints.length > 0
+}
+
+function syncProcessPlotMetricAfterPlot(
+  plMergedN: number,
+  plUnmatchedN: number,
+  rssiMergedN: number,
+  rssiUnmatchedN: number
+): void {
+  const plAny = plMergedN + plUnmatchedN > 0
+  const rssiAny = rssiMergedN + rssiUnmatchedN > 0
+  if (!plAny && !rssiAny) return
+  if (plAny && !rssiAny) {
+    processPlotMetric = 'path_loss'
+    return
+  }
+  if (!plAny && rssiAny) {
+    processPlotMetric = 'rssi'
+    return
+  }
+}
+
+function updateProcessMetricWrapVisibility(): void {
+  const show = processHasPlOverlay() && processHasRssiOverlay()
+  processMetricWrap.hidden = !show
+  if (show) {
+    processPlotMetricSelect.value = processPlotMetric
+  }
+}
+
 const PROCESS_HIST_BIN_WIDTH_DB = 20
+/** RSSI histogram uses 10 dBm bins (finer than path loss). */
+const PROCESS_HIST_RSSI_BIN_WIDTH_DB = 10
 /** Histogram range always extends to this path loss (dB) so the weakest bin (label e.g. 100–120) exists for very weak samples. */
 const PROCESS_HIST_PL_HISTOGRAM_MIN = -120
+/** RSSI histogram includes strong-signal bins up to −25 dBm. */
+const PROCESS_HIST_RSSI_HISTOGRAM_MAX = -25
 
 type PathLossBinRow = { low: number; high: number; count: number; seconds: number }
+
+type HistogramExtentOpts = { minFloor?: number; maxCeil?: number }
 
 /**
  * Bins aligned to multiples of `binWidthDb` dB; half-open [low, high).
@@ -1365,7 +1509,11 @@ type PathLossBinRow = { low: number; high: number; count: number; seconds: numbe
  * containing sample `i`'s path loss (time walking until the next plotted point).
  * The minimum extent includes **−120 dB** so a **−120…−100 dB** bin appears (alongside existing 20 dB bins).
  */
-function pathLossHistogramBinsFromMerged(points: MergedPlotPoint[], binWidthDb: number): PathLossBinRow[] {
+function pathLossHistogramBinsFromMerged(
+  points: MergedPlotPoint[],
+  binWidthDb: number,
+  extent?: HistogramExtentOpts
+): PathLossBinRow[] {
   if (points.length === 0) return []
   let minV = points[0]!.pathLoss
   let maxV = minV
@@ -1373,7 +1521,11 @@ function pathLossHistogramBinsFromMerged(points: MergedPlotPoint[], binWidthDb: 
     if (p.pathLoss < minV) minV = p.pathLoss
     if (p.pathLoss > maxV) maxV = p.pathLoss
   }
-  minV = Math.min(PROCESS_HIST_PL_HISTOGRAM_MIN, minV)
+  const minFloor = extent?.minFloor ?? PROCESS_HIST_PL_HISTOGRAM_MIN
+  minV = Math.min(minFloor, minV)
+  if (extent?.maxCeil != null) {
+    maxV = Math.max(extent.maxCeil, maxV)
+  }
   const w = binWidthDb
   const start = Math.floor(minV / w) * w
   const endExclusive = Math.floor(maxV / w) * w + w
@@ -1419,6 +1571,12 @@ function formatPathLossBinLabel(low: number, high: number): string {
   const lo = Math.round(Math.abs(low))
   const hi = Math.round(Math.abs(high))
   return `${Math.min(lo, hi)}-${Math.max(lo, hi)}`
+}
+
+function formatRssiBinLabel(low: number, high: number): string {
+  const a = Math.round(Math.min(low, high))
+  const b = Math.round(Math.max(low, high))
+  return `${a}–${b}`
 }
 
 /** Bin midpoint (dB) for palette — same `pathLossToColor` as the Process map overlay. */
@@ -1472,7 +1630,11 @@ function initProcessPlColourScale(): void {
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
 
-function updateProcessHistogramPie(rows: PathLossBinRow[], totalCount: number): void {
+function updateProcessHistogramPie(
+  rows: PathLossBinRow[],
+  totalCount: number,
+  binMidColor: (low: number, high: number) => string = pathLossBinMidColor
+): void {
   const svg = processHistogramPie
   svg.replaceChildren()
   if (totalCount <= 0) return
@@ -1486,7 +1648,7 @@ function updateProcessHistogramPie(rows: PathLossBinRow[], totalCount: number): 
 
   if (slices.length === 1) {
     const row = slices[0]!
-    const fill = pathLossBinMidColor(row.low, row.high)
+    const fill = binMidColor(row.low, row.high)
     const c = document.createElementNS(SVG_NS, 'circle')
     c.setAttribute('cx', String(cx))
     c.setAttribute('cy', String(cy))
@@ -1495,7 +1657,8 @@ function updateProcessHistogramPie(rows: PathLossBinRow[], totalCount: number): 
     c.setAttribute('stroke', 'rgba(0,0,0,0.22)')
     c.setAttribute('stroke-width', '0.75')
     const title = document.createElementNS(SVG_NS, 'title')
-    title.textContent = `${formatPathLossBinLabel(row.low, row.high)}: ${row.count} (100%)`
+    const lab = processMetricIsRssiView() ? `${formatRssiBinLabel(row.low, row.high)} dBm` : formatPathLossBinLabel(row.low, row.high)
+    title.textContent = `${lab}: ${row.count} (100%)`
     c.appendChild(title)
     svg.appendChild(c)
     return
@@ -1511,7 +1674,7 @@ function updateProcessHistogramPie(rows: PathLossBinRow[], totalCount: number): 
     const x1 = cx + r * Math.cos(a1)
     const y1 = cy + r * Math.sin(a1)
     const largeArc = delta > Math.PI ? 1 : 0
-    const fill = pathLossBinMidColor(row.low, row.high)
+    const fill = binMidColor(row.low, row.high)
     const path = document.createElementNS(SVG_NS, 'path')
     path.setAttribute(
       'd',
@@ -1522,7 +1685,8 @@ function updateProcessHistogramPie(rows: PathLossBinRow[], totalCount: number): 
     path.setAttribute('stroke-width', '0.75')
     const title = document.createElementNS(SVG_NS, 'title')
     const pct = (100 * row.count) / totalCount
-    title.textContent = `${formatPathLossBinLabel(row.low, row.high)}: ${row.count} (${pct.toFixed(1)}%)`
+    const lab2 = processMetricIsRssiView() ? `${formatRssiBinLabel(row.low, row.high)} dBm` : formatPathLossBinLabel(row.low, row.high)
+    title.textContent = `${lab2}: ${row.count} (${pct.toFixed(1)}%)`
     path.appendChild(title)
     svg.appendChild(path)
     a0 = a1
@@ -1530,25 +1694,46 @@ function updateProcessHistogramPie(rows: PathLossBinRow[], totalCount: number): 
 }
 
 function updateProcessHistogramTable(): void {
-  const n = processMergedPoints.length
+  const merged = getActiveProcessMerged()
+  const n = merged.length
   if (n === 0) {
     processHistogramWrap.hidden = true
     processHistogramBody.innerHTML = ''
     processHistogramPie.replaceChildren()
+    processColourScale.hidden = false
     return
   }
-  const rows = pathLossHistogramBinsFromMerged(processMergedPoints, PROCESS_HIST_BIN_WIDTH_DB)
+  const rssiView = processMetricIsRssiView()
+  const binW = rssiView ? PROCESS_HIST_RSSI_BIN_WIDTH_DB : PROCESS_HIST_BIN_WIDTH_DB
+  const rows = pathLossHistogramBinsFromMerged(
+    merged,
+    binW,
+    rssiView ? { minFloor: PROCESS_HIST_PL_HISTOGRAM_MIN, maxCeil: PROCESS_HIST_RSSI_HISTOGRAM_MAX } : undefined
+  )
   const total = n
+  const binMid = rssiView ? rssiBinMidColor : pathLossBinMidColor
+  const rangeLabel = rssiView ? formatRssiBinLabel : formatPathLossBinLabel
+  const rangeTh = rssiView ? 'Range (dBm)' : 'Range (dB)'
+  processHistogramTitle.textContent = rssiView
+    ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm)`
+    : `Path loss histogram (${PROCESS_HIST_BIN_WIDTH_DB} dB bins, down to −120 dB)`
+  processHistogramRangeTh.textContent = rangeTh
+  processHistogramPie.setAttribute(
+    'aria-label',
+    rssiView ? 'RSSI share by bin (same colors as map)' : 'Path loss share by bin (same colors as map)',
+  )
+  processColourScale.hidden = rssiView
   const parts: string[] = []
   for (const r of rows) {
     const pct = total > 0 ? (100 * r.count) / total : 0
-    const sw = pathLossBinMidColor(r.low, r.high)
+    const sw = binMid(r.low, r.high)
+    const cellRange = rssiView ? `${rangeLabel(r.low, r.high)} dBm` : rangeLabel(r.low, r.high)
     parts.push(
-      `<tr><td class="process-hist-col-swatch"><span class="process-hist-swatch" style="background:${sw}" title="Mid-bin colour" role="presentation"></span></td><td>${formatPathLossBinLabel(r.low, r.high)}</td><td>${r.count}</td><td>${r.seconds.toFixed(1)}</td><td>${pct.toFixed(1)}</td></tr>`,
+      `<tr><td class="process-hist-col-swatch"><span class="process-hist-swatch" style="background:${sw}" title="Mid-bin colour" role="presentation"></span></td><td>${cellRange}</td><td>${r.count}</td><td>${r.seconds.toFixed(1)}</td><td>${pct.toFixed(1)}</td></tr>`,
     )
   }
   processHistogramBody.innerHTML = parts.join('')
-  updateProcessHistogramPie(rows, total)
+  updateProcessHistogramPie(rows, total, binMid)
   processHistogramWrap.hidden = false
 }
 
@@ -1625,7 +1810,7 @@ function rebuildProcessMergedFromFspl(): void {
 
 function updateProcessFsplChrome(): void {
   const has = processMergedPointsRaw.length > 0
-  processFsplWrap.hidden = !has
+  processFsplWrap.hidden = !has || processMetricIsRssiView()
   processFsplEnable.disabled = !has
   processFsplRef.disabled = !has
   processFsplTarget.disabled = !has
@@ -1647,6 +1832,7 @@ function updateProcessFileSummary(): void {
     processFilenamePlan.textContent = processBundleSummaryOverride.plan
     processFilenameWalk.textContent = processBundleSummaryOverride.walk
     processFilenamePl.textContent = processBundleSummaryOverride.pl
+    processFilenameRssi.textContent = '—'
     updateProcessBundleButtons()
     return
   }
@@ -1654,6 +1840,7 @@ function updateProcessFileSummary(): void {
   processFilenamePlan.textContent = label(processFilePlan.files?.[0])
   processFilenameWalk.textContent = label(processFileWalk.files?.[0])
   processFilenamePl.textContent = label(processFilePl.files?.[0])
+  processFilenameRssi.textContent = label(processFileRssi.files?.[0])
   updateProcessBundleButtons()
 }
 
@@ -1667,6 +1854,10 @@ function clearProcessTrailState(): void {
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
   processPathLossCsvText = ''
+  processRssiCsvText = ''
+  processRssiMergedPoints = []
+  processRssiUnmatchedTrailPoints = []
+  processPlotMetric = 'path_loss'
   processBundleSummaryOverride = null
   processTrailDragIndex = null
   processNudgeTrail.checked = false
@@ -1723,19 +1914,18 @@ function findTrailHitIndex(clientX: number, clientY: number, dotR: number): numb
 function updateProcessTrailChrome(): void {
   const hasTrail = processTrailEditable.length > 0
   const hasMap = Boolean(processImg.naturalWidth)
-  const hasPathLossOverlay =
-    processMergedPoints.length > 0 || processUnmatchedTrailPoints.length > 0
-  const canNudge = hasTrail && hasMap && !hasPathLossOverlay
+  const hasAnyOverlay = processHasPlOverlay() || processHasRssiOverlay()
+  const canNudge = hasTrail && hasMap && !hasAnyOverlay
   processNudgeTrail.disabled = !canNudge
   if (!canNudge) {
     processNudgeTrail.checked = false
     processTrailDragIndex = null
   }
-  processResetTrail.disabled = !hasTrail || !processTrailPixelsDirty() || hasPathLossOverlay
+  processResetTrail.disabled = !hasTrail || !processTrailPixelsDirty() || hasAnyOverlay
   const saveDisabled = !hasTrail || !processTrailPixelsDirty()
   processSaveWalkEdited.disabled = saveDisabled
   processSaveWalkOriginal.disabled = saveDisabled
-  processBtnClearPlot.disabled = !hasPathLossOverlay
+  processBtnClearPlot.disabled = !hasAnyOverlay
   processNudgeSnap.disabled = !canNudge || processTrailEditable.length < 2
   if (!canNudge || processTrailEditable.length < 2) {
     processNudgeSnap.value = 'off'
@@ -1755,8 +1945,8 @@ function onTrailPointerDown(e: PointerEvent): void {
   if (
     e.button !== 0 ||
     !processNudgeTrail.checked ||
-    processMergedPoints.length > 0 ||
-    processUnmatchedTrailPoints.length > 0
+    processHasPlOverlay() ||
+    processHasRssiOverlay()
   ) {
     return
   }
@@ -1766,6 +1956,8 @@ function onTrailPointerDown(e: PointerEvent): void {
   processMergedPoints = []
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
+  processRssiMergedPoints = []
+  processRssiUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processTrailDragIndex = i
   processCanvas.setPointerCapture(e.pointerId)
@@ -1935,7 +2127,7 @@ function downloadProcessWalkCsv(mode: 'edited' | 'original'): void {
     mode === 'original'
       ? ' If you pick the same folder and filename in the save dialog, you can replace the existing file.'
       : ''
-  processStatus.textContent = `Saved ${filename}.${hint} Plot path loss uses the trail currently in memory.`
+  processStatus.textContent = `Saved ${filename}.${hint} Plot overlay uses the trail currently in memory.`
   drawProcessOverlay()
 }
 
@@ -1962,6 +2154,7 @@ function drawProcessOverlay(): void {
   if (!ctx || !processImg.naturalWidth) {
     if (processLegend) processLegend.hidden = true
     processHistogramWrap.hidden = true
+    processMetricWrap.hidden = true
     updateProcessTrailChrome()
     return
   }
@@ -1970,38 +2163,40 @@ function drawProcessOverlay(): void {
   const h = processCanvas.height / (window.devicePixelRatio || 1)
   ctx.clearRect(0, 0, w, h)
 
-  const showPathLossOverlay =
-    processMergedPoints.length > 0 || processUnmatchedTrailPoints.length > 0
+  const showMetricOverlay = processHasPlOverlay() || processHasRssiOverlay()
   const hasTrail = processTrailEditable.length > 0
   const dotR = Math.max(3, Math.min(w, h) / 80)
 
-  if (showPathLossOverlay) {
+  if (showMetricOverlay) {
+    updateProcessMetricWrapVisibility()
+    const merged = getActiveProcessMerged()
+    const unmatched = getActiveProcessUnmatched()
     const routeColors = getOverlayColors()
     const routePs = Math.min(1.2, Math.max(0.8, dotR / 5))
     const trailDiameter = 2 * dotR
-    let minPl = 0
-    let maxPl = 0
-    if (processMergedPoints.length > 0) {
-      minPl = processMergedPoints[0]!.pathLoss
-      maxPl = minPl
-      for (const p of processMergedPoints) {
-        if (p.pathLoss < minPl) minPl = p.pathLoss
-        if (p.pathLoss > maxPl) maxPl = p.pathLoss
+    let minV = 0
+    let maxV = 0
+    if (merged.length > 0) {
+      minV = merged[0]!.pathLoss
+      maxV = minV
+      for (const p of merged) {
+        if (p.pathLoss < minV) minV = p.pathLoss
+        if (p.pathLoss > maxV) maxV = p.pathLoss
       }
     }
-    if (processShowPlColoredTrail.checked && processMergedPoints.length > 1) {
+    if (processShowPlColoredTrail.checked && merged.length > 1) {
       ctx.lineJoin = 'round'
       ctx.lineCap = 'round'
       ctx.globalAlpha = 1
-      for (let i = 0; i < processMergedPoints.length - 1; i++) {
-        const a = processMergedPoints[i]!
-        const b = processMergedPoints[i + 1]!
+      for (let i = 0; i < merged.length - 1; i++) {
+        const a = merged[i]!
+        const b = merged[i + 1]!
         const q0 = imagePixelToElementLocal(a.x, a.y, processImg)
         const q1 = imagePixelToElementLocal(b.x, b.y, processImg)
         if (!q0 || !q1) continue
         const g = ctx.createLinearGradient(q0.x, q0.y, q1.x, q1.y)
-        g.addColorStop(0, pathLossToColor(a.pathLoss))
-        g.addColorStop(1, pathLossToColor(b.pathLoss))
+        g.addColorStop(0, metricValueToColor(a.pathLoss))
+        g.addColorStop(1, metricValueToColor(b.pathLoss))
         ctx.strokeStyle = g
         ctx.lineWidth = trailDiameter
         ctx.beginPath()
@@ -2010,7 +2205,7 @@ function drawProcessOverlay(): void {
         ctx.stroke()
       }
     }
-    if (processShowPlRoute.checked && processMergedPoints.length > 1) {
+    if (processShowPlRoute.checked && merged.length > 1) {
       ctx.strokeStyle = routeColors.trailLine
       ctx.globalAlpha = 0.5
       ctx.lineWidth = Math.max(1.25, 2 * routePs)
@@ -2018,7 +2213,7 @@ function drawProcessOverlay(): void {
       ctx.lineCap = 'round'
       ctx.beginPath()
       let first = true
-      for (const pt of processMergedPoints) {
+      for (const pt of merged) {
         const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
         if (!q) continue
         if (first) {
@@ -2031,14 +2226,13 @@ function drawProcessOverlay(): void {
       ctx.stroke()
       ctx.globalAlpha = 1
     }
-    const trailOnlyRibbon =
-      processShowPlColoredTrail.checked && processMergedPoints.length > 1
+    const trailOnlyRibbon = processShowPlColoredTrail.checked && merged.length > 1
     if (!trailOnlyRibbon) {
-      for (const pt of processMergedPoints) {
+      for (const pt of merged) {
         const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
         if (!q) continue
         const isOriginalWalk = pt.source !== 'interpolated'
-        ctx.fillStyle = pathLossToColor(pt.pathLoss)
+        ctx.fillStyle = metricValueToColor(pt.pathLoss)
         ctx.beginPath()
         ctx.arc(q.x, q.y, dotR, 0, Math.PI * 2)
         ctx.fill()
@@ -2054,7 +2248,7 @@ function drawProcessOverlay(): void {
         }
       }
     }
-    for (const pt of processUnmatchedTrailPoints) {
+    for (const pt of unmatched) {
       const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
       if (!q) continue
       ctx.fillStyle = '#000000'
@@ -2062,7 +2256,7 @@ function drawProcessOverlay(): void {
       ctx.arc(q.x, q.y, dotR, 0, Math.PI * 2)
       ctx.fill()
     }
-    if (processShowPlLabels.checked && processMergedPoints.length > 0) {
+    if (processShowPlLabels.checked && merged.length > 0) {
       const fontPx = Math.max(11, Math.min(16, Math.min(w, h) / 48))
       ctx.font = `600 ${fontPx}px system-ui, Segoe UI, sans-serif`
       ctx.textAlign = 'left'
@@ -2070,10 +2264,11 @@ function drawProcessOverlay(): void {
       ctx.lineJoin = 'round'
       ctx.miterLimit = 2
       const labelDx = trailOnlyRibbon ? trailDiameter / 2 + 5 : dotR + 4
-      for (const pt of processMergedPoints) {
+      const unit = processMetricIsRssiView() ? 'dBm' : 'dB'
+      for (const pt of merged) {
         const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
         if (!q) continue
-        const text = `${pt.pathLoss.toFixed(1)} dB`
+        const text = `${pt.pathLoss.toFixed(1)} ${unit}`
         const lx = q.x + labelDx
         const ly = q.y
         ctx.lineWidth = Math.max(2, fontPx * 0.22)
@@ -2083,29 +2278,39 @@ function drawProcessOverlay(): void {
         ctx.fillText(text, lx, ly)
       }
     }
-    const nInterp = processMergedPoints.filter((p) => p.source === 'interpolated').length
-    const nUser = processMergedPoints.length - nInterp
+    const nInterp = merged.filter((p) => p.source === 'interpolated').length
+    const nUser = merged.length - nInterp
+    const ringTitle = processMetricIsRssiView()
+      ? 'Original (non-interpolated) points — grey ring; fill is RSSI (dBm).'
+      : 'Original (non-interpolated) points — grey ring; fill is still path loss (dB).'
     const walkTypesLegend =
-      processMergedPoints.length > 0 && (nUser > 0 || nInterp > 0)
-        ? `<span>Walk: <strong>${nUser}</strong> original <span class="process-legend-user-ring" title="Original (non-interpolated) points — grey ring; fill is still path loss (dB)."></span> · <strong>${nInterp}</strong> interpolated (no ring)</span>`
+      merged.length > 0 && (nUser > 0 || nInterp > 0)
+        ? `<span>Walk: <strong>${nUser}</strong> original <span class="process-legend-user-ring" title="${ringTitle}"></span> · <strong>${nInterp}</strong> interpolated (no ring)</span>`
         : ''
     const unmatchedLegend =
-      processUnmatchedTrailPoints.length > 0
-        ? `<span><strong>${processUnmatchedTrailPoints.length}</strong> trail pt(s): no RF within <strong>${DEFAULT_MAX_MATCH_MS / 1000}s</strong> — <span class="process-legend-unmatched" title="Nearest path-loss log sample was farther than this in time (common in weak areas with sparse logging)."></span> black dot</span>`
+      unmatched.length > 0
+        ? `<span><strong>${unmatched.length}</strong> trail pt(s): no RF within <strong>${DEFAULT_MAX_MATCH_MS / 1000}s</strong> — <span class="process-legend-unmatched" title="Nearest log sample was farther than this in time (common in weak areas with sparse logging)."></span> black dot</span>`
         : ''
     processLegend.hidden = false
     const fsplLegend =
-      processMergedPointsRaw.length > 0 && processFsplEnable.checked
+      !processMetricIsRssiView() &&
+      processMergedPointsRaw.length > 0 &&
+      processFsplEnable.checked
         ? `<span>FSPL: estimated at <strong>${processFsplTarget.value}</strong> MHz (walk at <strong>${processFsplRef.value}</strong> MHz, free space)</span>`
         : ''
+    const metricLabel = processMetricIsRssiView() ? 'RSSI' : 'PL'
+    const metricUnit = processMetricIsRssiView() ? 'dBm' : 'dB'
     const dataRangeSpan =
-      processMergedPoints.length > 0
-        ? `<span><strong>${processMergedPoints.length}</strong> matched · PL <strong>${minPl.toFixed(1)}</strong>–<strong>${maxPl.toFixed(1)}</strong> dB</span>`
+      merged.length > 0
+        ? `<span><strong>${merged.length}</strong> matched · ${metricLabel} <strong>${minV.toFixed(1)}</strong>–<strong>${maxV.toFixed(1)}</strong> ${metricUnit}</span>`
         : ''
     const scaleSpan =
-      processMergedPoints.length > 0
-        ? `<span>Color scale <strong>−30</strong> … <strong>−120</strong> dB (outside range is clamped)</span>
-    <span class="process-legend-gradient" style="background:${pathLossScaleGradientCss()}"></span>`
+      merged.length > 0
+        ? processMetricIsRssiView()
+          ? `<span>Color scale <strong>−25</strong> … <strong>−120</strong> dBm (outside range is clamped)</span>
+    <span class="process-legend-gradient" style="background:${metricScaleGradientCss()}"></span>`
+          : `<span>Color scale <strong>−30</strong> … <strong>−120</strong> dB (outside range is clamped)</span>
+    <span class="process-legend-gradient" style="background:${metricScaleGradientCss()}"></span>`
         : ''
     processLegend.innerHTML = `<div class="process-legend-inner">
     ${scaleSpan}
@@ -2115,6 +2320,7 @@ function drawProcessOverlay(): void {
     ${dataRangeSpan}
   </div>`
     updateProcessHistogramTable()
+    updateProcessFsplChrome()
     updateProcessTrailChrome()
     return
   }
@@ -2123,9 +2329,7 @@ function drawProcessOverlay(): void {
     const colors = getOverlayColors()
     const trailPs = Math.min(1.25, Math.max(0.85, dotR / 5.5))
     const nudgeOn =
-      processNudgeTrail.checked &&
-      processMergedPoints.length === 0 &&
-      processUnmatchedTrailPoints.length === 0
+      processNudgeTrail.checked && !processHasPlOverlay() && !processHasRssiOverlay()
 
     if (processTrailEditable.length > 0) {
       ctx.strokeStyle = colors.trailLine
@@ -2212,6 +2416,8 @@ function drawProcessOverlay(): void {
   </div>`
     processHistogramWrap.hidden = true
     processHistogramBody.innerHTML = ''
+    processColourScale.hidden = false
+    processMetricWrap.hidden = true
     updateProcessTrailChrome()
     return
   }
@@ -2219,6 +2425,8 @@ function drawProcessOverlay(): void {
   processLegend.hidden = true
   processHistogramWrap.hidden = true
   processHistogramBody.innerHTML = ''
+  processColourScale.hidden = false
+  processMetricWrap.hidden = true
   updateProcessTrailChrome()
 }
 
@@ -2298,9 +2506,14 @@ async function applyProcessBundle(bundle: ProcessBundleV1): Promise<void> {
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
   processPathLossCsvText = bundle.pathLossCsv
+  processRssiCsvText = ''
+  processRssiMergedPoints = []
+  processRssiUnmatchedTrailPoints = []
+  processPlotMetric = 'path_loss'
   processFilePlan.value = ''
   processFileWalk.value = ''
   processFilePl.value = ''
+  processFileRssi.value = ''
   processNudgeTrail.checked = false
   processTrailDragIndex = null
   processFsplEnable.checked = false
@@ -2328,7 +2541,7 @@ async function applyProcessBundle(bundle: ProcessBundleV1): Promise<void> {
     pl: '(from bundle)',
   }
   updateProcessFileSummary()
-  processStatus.textContent = `Loaded process bundle (saved ${bundle.savedAt.slice(0, 19)}). Tap Plot path loss to redraw the overlay.`
+  processStatus.textContent = `Loaded process bundle (saved ${bundle.savedAt.slice(0, 19)}). Tap Plot overlay to redraw.`
   drawProcessOverlay()
 }
 
@@ -2347,7 +2560,11 @@ function mergeTimeOptsFromPreamble(): MergeTimeOptions | undefined {
 function runProcessPlot(): void {
   const walkFile = processFileWalk.files?.[0]
   const plFile = processFilePl.files?.[0]
+  const rssiFile = processFileRssi.files?.[0]
   const plFromMemory = processPathLossCsvText.trim().length > 0
+  const rssiFromMemory = processRssiCsvText.trim().length > 0
+  const wantPl = Boolean(plFile || plFromMemory)
+  const wantRssi = Boolean(rssiFile || rssiFromMemory)
   if (!processImg.naturalWidth) {
     processStatus.textContent = 'Load a floor plan image first.'
     return
@@ -2356,13 +2573,13 @@ function runProcessPlot(): void {
     processStatus.textContent = 'Load a Walkplotter CSV with trail rows first.'
     return
   }
-  if (!plFile && !plFromMemory) {
-    processStatus.textContent = 'Choose a path loss CSV (or load a process bundle).'
+  if (!wantPl && !wantRssi) {
+    processStatus.textContent =
+      'Choose a path loss CSV and/or an RSSI CSV (`time` + `rssi`), or load a process bundle with path loss.'
     return
   }
   void (async () => {
     try {
-      const plText = plFile ? await readFileAsText(plFile) : processPathLossCsvText
       let testDate = processWalkTestDate
       if (!testDate && walkFile) {
         const walkText = await readFileAsText(walkFile)
@@ -2382,53 +2599,120 @@ function runProcessPlot(): void {
         processMergedPoints = []
         processMergedPointsRaw = []
         processUnmatchedTrailPoints = []
+        processRssiMergedPoints = []
+        processRssiUnmatchedTrailPoints = []
         updateProcessFsplChrome()
         drawProcessOverlay()
         return
       }
-      const plRows = parsePathLossCsv(plText)
-      if (!plRows.length) {
-        processStatus.textContent =
-          'No path loss rows found (expect HH:MM:SS first field, 4th field = number).'
+
+      if (!wantPl) {
         processMergedPoints = []
         processMergedPointsRaw = []
         processUnmatchedTrailPoints = []
-        updateProcessFsplChrome()
-        drawProcessOverlay()
-        return
       }
+      if (!wantRssi) {
+        processRssiMergedPoints = []
+        processRssiUnmatchedTrailPoints = []
+      }
+
       const trailForMerge: WalkplotterTrailRow[] = processTrailEditable
-      const { merged, unmatched } = mergeByNearestTime(
-        testDate,
-        trailForMerge,
-        plRows,
-        DEFAULT_MAX_MATCH_MS,
-        mergeTimeOptsFromPreamble()
-      )
-      processUnmatchedTrailPoints = unmatched
-      processMergedPointsRaw = merged.map((p) => ({ ...p }))
-      rebuildProcessMergedFromFspl()
-      updateProcessFsplChrome()
+      const mergeOpts = mergeTimeOptsFromPreamble()
       const dtSec = DEFAULT_MAX_MATCH_MS / 1000
-      if (merged.length === 0) {
-        processStatus.textContent =
-          unmatched.length > 0
-            ? `No RF sample within ${dtSec}s of any trail time — ${unmatched.length} position(s) shown as black dots (weak areas often log sparser; check clock sync).`
-            : `No points matched within ${dtSec}s — check times and date (${testDate}).`
-        drawProcessOverlay()
-        return
+      let plMergedN = 0
+      let plUnmatchedN = 0
+      let rssiMergedN = 0
+      let rssiUnmatchedN = 0
+      const parts: string[] = []
+
+      if (wantPl) {
+        const plText = plFile ? await readFileAsText(plFile) : processPathLossCsvText
+        const plRows = parsePathLossCsv(plText)
+        if (!plRows.length) {
+          processMergedPoints = []
+          processMergedPointsRaw = []
+          processUnmatchedTrailPoints = []
+          parts.push('Path loss: no rows parsed (expect HH:MM:SS first field, 4th field = number).')
+        } else {
+          const { merged, unmatched } = mergeByNearestTime(
+            testDate,
+            trailForMerge,
+            plRows,
+            DEFAULT_MAX_MATCH_MS,
+            mergeOpts
+          )
+          processUnmatchedTrailPoints = unmatched
+          processMergedPointsRaw = merged.map((p) => ({ ...p }))
+          plMergedN = merged.length
+          plUnmatchedN = unmatched.length
+          if (merged.length === 0) {
+            parts.push(
+              unmatched.length > 0
+                ? `Path loss: no sample within ${dtSec}s — ${unmatched.length} black dot(s).`
+                : `Path loss: no match within ${dtSec}s (check times for ${testDate}).`
+            )
+          } else {
+            const uMsg =
+              unmatched.length > 0
+                ? ` ${unmatched.length} trail pt(s) had no path loss within ${dtSec}s (black dots).`
+                : ''
+            parts.push(
+              `Path loss: matched ${merged.length} of ${processTrailEditable.length} trail samples.${uMsg}`,
+            )
+          }
+        }
       }
-      const uMsg =
-        unmatched.length > 0
-          ? ` ${unmatched.length} trail pt(s) had no RF within ${dtSec}s (black dots).`
-          : ''
-      processStatus.textContent = `Matched ${merged.length} of ${processTrailEditable.length} trail samples to nearest RF reading (date ${testDate}).${uMsg}`
+      rebuildProcessMergedFromFspl()
+
+      if (wantRssi) {
+        const rssiText = rssiFile ? await readFileAsText(rssiFile) : processRssiCsvText
+        const rssiRows = parseRssiCsv(rssiText)
+        if (!rssiRows.length) {
+          processRssiMergedPoints = []
+          processRssiUnmatchedTrailPoints = []
+          parts.push('RSSI: no rows parsed (expect `time` and `rssi` columns, or two columns time + dBm).')
+        } else {
+          const { merged: rm, unmatched: ru } = mergeByNearestTime(
+            testDate,
+            trailForMerge,
+            rssiRows,
+            DEFAULT_MAX_MATCH_MS,
+            mergeOpts
+          )
+          processRssiMergedPoints = rm
+          processRssiUnmatchedTrailPoints = ru
+          rssiMergedN = rm.length
+          rssiUnmatchedN = ru.length
+          if (rm.length === 0) {
+            parts.push(
+              ru.length > 0
+                ? `RSSI: no sample within ${dtSec}s — ${ru.length} black dot(s).`
+                : `RSSI: no match within ${dtSec}s (check times for ${testDate}).`
+            )
+          } else {
+            const uMsg =
+              ru.length > 0
+                ? ` ${ru.length} trail pt(s) had no RSSI within ${dtSec}s (black dots).`
+                : ''
+            parts.push(`RSSI: matched ${rm.length} of ${processTrailEditable.length} trail samples.${uMsg}`)
+          }
+        }
+      }
+
+      updateProcessFsplChrome()
+      syncProcessPlotMetricAfterPlot(plMergedN, plUnmatchedN, rssiMergedN, rssiUnmatchedN)
+      const anyOverlay = processHasPlOverlay() || processHasRssiOverlay()
+      processStatus.textContent = anyOverlay
+        ? `${parts.join(' ')} (date ${testDate}).`
+        : parts.join(' ') || 'Nothing to plot for the chosen file(s).'
       drawProcessOverlay()
     } catch (e) {
       processStatus.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`
       processMergedPoints = []
       processMergedPointsRaw = []
       processUnmatchedTrailPoints = []
+      processRssiMergedPoints = []
+      processRssiUnmatchedTrailPoints = []
       updateProcessFsplChrome()
       drawProcessOverlay()
     }
@@ -2823,6 +3107,7 @@ processFilePlan.addEventListener('change', () => {
   clearProcessTrailState()
   processFileWalk.value = ''
   processFilePl.value = ''
+  processFileRssi.value = ''
   if (!f || !f.type.startsWith('image/')) {
     processImg.removeAttribute('src')
     processPlaceholder.hidden = false
@@ -2848,6 +3133,10 @@ processFileWalk.addEventListener('change', () => {
     processMergedPoints = []
     processMergedPointsRaw = []
     processUnmatchedTrailPoints = []
+    processRssiMergedPoints = []
+    processRssiUnmatchedTrailPoints = []
+    processRssiCsvText = ''
+    processFileRssi.value = ''
     updateProcessFsplChrome()
     processTrailDragIndex = null
     processNudgeTrail.checked = false
@@ -2884,6 +3173,10 @@ processFileWalk.addEventListener('change', () => {
       processMergedPoints = []
       processMergedPointsRaw = []
       processUnmatchedTrailPoints = []
+      processRssiMergedPoints = []
+      processRssiUnmatchedTrailPoints = []
+      processRssiCsvText = ''
+      processFileRssi.value = ''
       const tsInfo = extractWalkplotterTimestampInfo(text)
       let tsNote = ''
       if (tsInfo.semantics === 'elapsed_since_session_start') {
@@ -2895,9 +3188,9 @@ processFileWalk.addEventListener('change', () => {
         }
       }
       if (!processWalkTestDate) {
-        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Add # test_date_local: YYYY-MM-DD for Plot path loss.${tsNote}`
+        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Add # test_date_local: YYYY-MM-DD for Plot overlay.${tsNote}`
       } else {
-        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Nudge and save if needed, then choose path loss CSV and Plot path loss.${tsNote}`
+        processStatus.textContent = `Loaded ${processTrailEditable.length} trail points. Nudge and save if needed, then choose path loss and/or RSSI CSV and Plot overlay.${tsNote}`
       }
       drawProcessOverlay()
     } catch (e) {
@@ -2913,6 +3206,15 @@ processFilePl.addEventListener('change', () => {
     processBundleSummaryOverride = null
     const f = processFilePl.files?.[0]
     processPathLossCsvText = f ? await readFileAsText(f) : ''
+    updateProcessFileSummary()
+  })()
+})
+
+processFileRssi.addEventListener('change', () => {
+  void (async () => {
+    processBundleSummaryOverride = null
+    const f = processFileRssi.files?.[0]
+    processRssiCsvText = f ? await readFileAsText(f) : ''
     updateProcessFileSummary()
   })()
 })
@@ -2977,8 +3279,16 @@ processBtnClearPlot.addEventListener('click', () => {
   processMergedPoints = []
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
+  processRssiMergedPoints = []
+  processRssiUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processFsplDelta.textContent = ''
+  drawProcessOverlay()
+})
+
+processPlotMetricSelect.addEventListener('change', () => {
+  const v = processPlotMetricSelect.value
+  processPlotMetric = v === 'rssi' ? 'rssi' : 'path_loss'
   drawProcessOverlay()
 })
 processFsplEnable.addEventListener('change', () => {
@@ -3006,6 +3316,8 @@ processResetTrail.addEventListener('click', () => {
   processMergedPoints = []
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
+  processRssiMergedPoints = []
+  processRssiUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processFsplDelta.textContent = ''
   drawProcessOverlay()

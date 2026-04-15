@@ -51,7 +51,8 @@ const SESSION_EPOCH_RE = /^#\s*session_epoch_ms:\s*(\d+)\s*$/i
 export type TimestampSemantics = 'wall_clock' | 'elapsed_since_session_start'
 
 const HMS_DURATION_RE = /^\d+:\d{2}:\d{2}$/
-const HMS_WALL_RE = /^\d{1,2}:\d{2}:\d{2}$/
+/** Wall-clock time: H:MM:SS with optional fractional seconds (e.g. `15:43:58.783`). */
+const HMS_WALL_RE = /^\d{1,2}:\d{2}:\d{2}(\.\d+)?$/
 
 function parseCsvLine(line: string): string[] {
   const cells: string[] = []
@@ -91,6 +92,22 @@ function parseCsvLine(line: string): string[] {
   }
   cells.push(cur)
   return cells
+}
+
+/**
+ * Split one data line from metric logs: tab-heavy exports (Time / RSSI) or plain CSV.
+ * If the line contains a tab, split on runs of tabs and/or commas so `15:44:01.001,\t-70.8\t52…` works;
+ * otherwise use CSV-aware splitting for quoted commas.
+ */
+function splitMetricLogLine(line: string): string[] {
+  const trimmed = line.trim()
+  if (trimmed.includes('\t')) {
+    return trimmed
+      .split(/[\t,]+/)
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0)
+  }
+  return parseCsvLine(trimmed).map((c) => c.trim())
 }
 
 /** Extract `YYYY-MM-DD` from `# test_date_local:` header. */
@@ -274,10 +291,61 @@ export function parsePathLossCsv(text: string): PathLossRow[] {
   return out
 }
 
+/**
+ * RSSI log: header row with `time` / `rssi` (or `Time` / `RSSI`) columns (case-insensitive), or first two
+ * columns as time then RSSI (dBm). Tab- or comma-separated; extra columns (e.g. lat/lon) are ignored.
+ * Wall-clock times may include fractional seconds (`15:43:58.783`). Reuses `PathLossRow` with `pathLoss`
+ * holding RSSI in dBm for merge.
+ */
+export function parseRssiCsv(text: string): PathLossRow[] {
+  const lines = text.split(/\r?\n/)
+  let timeIdx = 0
+  let rssiIdx = 1
+  let dataStart = 0
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]!.trim()
+    if (!raw || raw.startsWith('#')) continue
+    const parts = splitMetricLogLine(raw)
+    const lower = parts.map((c) => c.toLowerCase())
+    const ti = lower.indexOf('time')
+    const ri = lower.indexOf('rssi')
+    if (ti >= 0 && ri >= 0 && ti !== ri) {
+      timeIdx = ti
+      rssiIdx = ri
+      dataStart = i + 1
+      break
+    }
+    dataStart = i
+    break
+  }
+  const out: PathLossRow[] = []
+  for (let i = dataStart; i < lines.length; i++) {
+    const raw = lines[i]!.trim()
+    if (!raw || raw.startsWith('#')) continue
+    const parts = splitMetricLogLine(raw)
+    if (parts.length <= Math.max(timeIdx, rssiIdx)) continue
+    const time = parts[timeIdx]!
+    const rssi = Number(parts[rssiIdx])
+    if (!Number.isFinite(rssi)) continue
+    if (!HMS_WALL_RE.test(time) && !HMS_DURATION_RE.test(time)) continue
+    out.push({ time, pathLoss: rssi })
+  }
+  return out
+}
+
 function localMs(dateYmd: string, hms: string): number {
   const [y, mo, d] = dateYmd.split('-').map(Number)
-  const [h, mi, s] = hms.split(':').map(Number)
-  return new Date(y, mo - 1, d, h, mi, s).getTime()
+  const m = /^(\d{1,2}):(\d{2}):(\d{2})(\.\d+)?$/.exec(hms.trim())
+  if (!m) return NaN
+  const h = Number(m[1])
+  const mi = Number(m[2])
+  const secInt = Number(m[3])
+  let ms = 0
+  if (m[4]) {
+    const frac = parseFloat(m[4]!)
+    if (Number.isFinite(frac)) ms = Math.round(frac * 1000)
+  }
+  return new Date(y, mo - 1, d, h, mi, secInt, ms).getTime()
 }
 
 /** Default: match RF sample within 3s of each trail timestamp. */
