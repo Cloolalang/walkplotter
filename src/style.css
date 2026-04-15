@@ -784,6 +784,47 @@ body {
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.process-toolbar--shift {
+  margin-top: -2px;
+  padding-top: 4px;
+  align-items: center;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+}
+
+.process-shift-lead {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  max-width: 20rem;
+  line-height: 1.35;
+}
+
+.process-shift-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.process-shift-label {
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.process-shift-input {
+  width: 5.25rem;
+  font: inherit;
+  font-weight: 600;
+  padding: 6px 8px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}
+
 .process-snap-wrap {
   display: inline-flex;
   align-items: center;

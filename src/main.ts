@@ -86,6 +86,11 @@ let processTrailOriginal: EditableTrailRow[] = []
 let processWalkTestDate: string | null = null
 let processTrailDragIndex: number | null = null
 
+const PROCESS_OVERLAY_SHIFT_STORAGE_KEY = 'walkplotter-process-overlay-shift-v1'
+/** Draw trail and RF overlay at (x + Δx, y + Δy) in intrinsic image pixels (display-only until you nudge and save). */
+let processOverlayShiftX = 0
+let processOverlayShiftY = 0
+
 /** Pan (px) and scale for the floor plan; CSS transform on #stage-inner. */
 let mapPanX = 0
 let mapPanY = 0
@@ -750,6 +755,22 @@ app.innerHTML = `
         Save (original name)
       </button>
     </div>
+    <div class="process-toolbar process-toolbar--shift" id="process-overlay-shift-wrap">
+      <span
+        class="process-shift-lead"
+        title="Moves every trail dot and RF overlay marker together in image pixel space. Positive Δy draws lower on the plan. Does not change the CSV until you nudge points and save—useful when the same file looks misaligned on another device."
+        >Overlay shift</span
+      >
+      <label class="process-shift-field" for="process-shift-x"
+        ><span class="process-shift-label">Δx px</span>
+        <input type="number" id="process-shift-x" class="process-shift-input" step="1" value="0" />
+      </label>
+      <label class="process-shift-field" for="process-shift-y"
+        ><span class="process-shift-label">Δy px</span>
+        <input type="number" id="process-shift-y" class="process-shift-input" step="1" value="0" />
+      </label>
+      <button type="button" class="btn" id="process-shift-reset" title="Clear overlay shift (0, 0)">Reset shift</button>
+    </div>
     <div class="process-files-summary" id="process-files-summary" aria-live="polite">
       <div class="process-file-row">
         <span class="process-file-kind">Floor plan</span>
@@ -971,6 +992,9 @@ const processNudgeSnap = document.querySelector<HTMLSelectElement>('#process-nud
 const processResetTrail = document.querySelector<HTMLButtonElement>('#process-reset-trail')!
 const processSaveWalkEdited = document.querySelector<HTMLButtonElement>('#process-save-walk-edited')!
 const processSaveWalkOriginal = document.querySelector<HTMLButtonElement>('#process-save-walk-original')!
+const processShiftXInput = document.querySelector<HTMLInputElement>('#process-shift-x')!
+const processShiftYInput = document.querySelector<HTMLInputElement>('#process-shift-y')!
+const processShiftReset = document.querySelector<HTMLButtonElement>('#process-shift-reset')!
 const processStatus = document.querySelector<HTMLParagraphElement>('#process-status')!
 const processFilenamePlan = document.querySelector<HTMLSpanElement>('#process-filename-plan')!
 const processFilenameWalk = document.querySelector<HTMLSpanElement>('#process-filename-walk')!
@@ -1883,6 +1907,57 @@ function clampPixelToImage(x: number, y: number, iw: number, ih: number): { x: n
   }
 }
 
+/** Map intrinsic image pixels to overlay canvas coords, including user overlay shift. */
+function processImgToOverlayLocal(ix: number, iy: number): { x: number; y: number } | null {
+  if (!processImg.naturalWidth) return null
+  return imagePixelToElementLocal(
+    ix + processOverlayShiftX,
+    iy + processOverlayShiftY,
+    processImg
+  )
+}
+
+function loadProcessOverlayShiftFromStorage(): void {
+  processOverlayShiftX = 0
+  processOverlayShiftY = 0
+  try {
+    const raw = localStorage.getItem(PROCESS_OVERLAY_SHIFT_STORAGE_KEY)
+    if (!raw) return
+    const o = JSON.parse(raw) as { x?: unknown; y?: unknown }
+    const x = Number(o.x)
+    const y = Number(o.y)
+    if (Number.isFinite(x)) processOverlayShiftX = x
+    if (Number.isFinite(y)) processOverlayShiftY = y
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveProcessOverlayShiftToStorage(): void {
+  try {
+    localStorage.setItem(
+      PROCESS_OVERLAY_SHIFT_STORAGE_KEY,
+      JSON.stringify({ x: processOverlayShiftX, y: processOverlayShiftY }),
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncProcessOverlayShiftInputs(): void {
+  processShiftXInput.value = String(processOverlayShiftX)
+  processShiftYInput.value = String(processOverlayShiftY)
+}
+
+function commitProcessOverlayShiftFromInputs(): void {
+  const x = Number(processShiftXInput.value)
+  const y = Number(processShiftYInput.value)
+  processOverlayShiftX = Number.isFinite(x) ? x : 0
+  processOverlayShiftY = Number.isFinite(y) ? y : 0
+  saveProcessOverlayShiftToStorage()
+  drawProcessOverlay()
+}
+
 function processTrailDotRadius(): number {
   const w = processCanvas.width / (window.devicePixelRatio || 1)
   const h = processCanvas.height / (window.devicePixelRatio || 1)
@@ -1900,7 +1975,7 @@ function findTrailHitIndex(clientX: number, clientY: number, dotR: number): numb
   let bestD = Infinity
   for (let i = 0; i < processTrailEditable.length; i++) {
     const pt = processTrailEditable[i]!
-    const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+    const q = processImgToOverlayLocal(pt.x, pt.y)
     if (!q) continue
     const d = Math.hypot(lx - q.x, ly - q.y)
     if (d <= hitSlop && d < bestD) {
@@ -2071,7 +2146,12 @@ function onTrailPointerMove(e: PointerEvent): void {
   if (!hit.ok) return
   const iw = processImg.naturalWidth
   const ih = processImg.naturalHeight
-  let c = clampPixelToImage(hit.pixel.x, hit.pixel.y, iw, ih)
+  let c = clampPixelToImage(
+    hit.pixel.x - processOverlayShiftX,
+    hit.pixel.y - processOverlayShiftY,
+    iw,
+    ih
+  )
   const idx = processTrailDragIndex
   const snapVal = processNudgeSnap.value
   if (snapVal !== 'off') {
@@ -2191,8 +2271,8 @@ function drawProcessOverlay(): void {
       for (let i = 0; i < merged.length - 1; i++) {
         const a = merged[i]!
         const b = merged[i + 1]!
-        const q0 = imagePixelToElementLocal(a.x, a.y, processImg)
-        const q1 = imagePixelToElementLocal(b.x, b.y, processImg)
+        const q0 = processImgToOverlayLocal(a.x, a.y)
+        const q1 = processImgToOverlayLocal(b.x, b.y)
         if (!q0 || !q1) continue
         const g = ctx.createLinearGradient(q0.x, q0.y, q1.x, q1.y)
         g.addColorStop(0, metricValueToColor(a.pathLoss))
@@ -2214,7 +2294,7 @@ function drawProcessOverlay(): void {
       ctx.beginPath()
       let first = true
       for (const pt of merged) {
-        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        const q = processImgToOverlayLocal(pt.x, pt.y)
         if (!q) continue
         if (first) {
           ctx.moveTo(q.x, q.y)
@@ -2229,7 +2309,7 @@ function drawProcessOverlay(): void {
     const trailOnlyRibbon = processShowPlColoredTrail.checked && merged.length > 1
     if (!trailOnlyRibbon) {
       for (const pt of merged) {
-        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        const q = processImgToOverlayLocal(pt.x, pt.y)
         if (!q) continue
         const isOriginalWalk = pt.source !== 'interpolated'
         ctx.fillStyle = metricValueToColor(pt.pathLoss)
@@ -2249,7 +2329,7 @@ function drawProcessOverlay(): void {
       }
     }
     for (const pt of unmatched) {
-      const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+      const q = processImgToOverlayLocal(pt.x, pt.y)
       if (!q) continue
       ctx.fillStyle = '#000000'
       ctx.beginPath()
@@ -2266,7 +2346,7 @@ function drawProcessOverlay(): void {
       const labelDx = trailOnlyRibbon ? trailDiameter / 2 + 5 : dotR + 4
       const unit = processMetricIsRssiView() ? 'dBm' : 'dB'
       for (const pt of merged) {
-        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        const q = processImgToOverlayLocal(pt.x, pt.y)
         if (!q) continue
         const text = `${pt.pathLoss.toFixed(1)} ${unit}`
         const lx = q.x + labelDx
@@ -2340,7 +2420,7 @@ function drawProcessOverlay(): void {
       ctx.beginPath()
       for (let i = 0; i < processTrailEditable.length; i++) {
         const pt = processTrailEditable[i]!
-        const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+        const q = processImgToOverlayLocal(pt.x, pt.y)
         if (!q) continue
         if (i === 0 || pt.newSegment === '1') {
           ctx.moveTo(q.x, q.y)
@@ -2360,7 +2440,7 @@ function drawProcessOverlay(): void {
           ? processTrailDragIndex
           : processTrailEditable.length - 1
       const cpt = processTrailEditable[idx]!
-      crossLocal = imagePixelToElementLocal(cpt.x, cpt.y, processImg)
+      crossLocal = processImgToOverlayLocal(cpt.x, cpt.y)
       crossIdx = idx
     }
 
@@ -2381,7 +2461,7 @@ function drawProcessOverlay(): void {
 
     for (let i = 0; i < processTrailEditable.length; i++) {
       const pt = processTrailEditable[i]!
-      const q = imagePixelToElementLocal(pt.x, pt.y, processImg)
+      const q = processImgToOverlayLocal(pt.x, pt.y)
       if (!q) continue
       const showRing = nudgeOn && crossIdx !== null && i === crossIdx
       if (showRing) {
@@ -3328,6 +3408,17 @@ processCanvas.addEventListener('pointerdown', onTrailPointerDown)
 processCanvas.addEventListener('pointermove', onTrailPointerMove)
 processCanvas.addEventListener('pointerup', onTrailPointerUp)
 processCanvas.addEventListener('pointercancel', onTrailPointerUp)
+loadProcessOverlayShiftFromStorage()
+syncProcessOverlayShiftInputs()
+processShiftXInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
+processShiftYInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
+processShiftReset.addEventListener('click', () => {
+  processOverlayShiftX = 0
+  processOverlayShiftY = 0
+  syncProcessOverlayShiftInputs()
+  saveProcessOverlayShiftToStorage()
+  drawProcessOverlay()
+})
 updateProcessFileSummary()
 
 function commitTapIfPending(e: PointerEvent, wasTapPending: boolean): void {
