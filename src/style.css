@@ -551,6 +551,10 @@ body {
   accent-color: var(--accent);
 }
 
+.tab-panel--process .process-dot-size-bar {
+  margin-top: 6px;
+}
+
 .pin-size-pct {
   font-variant-numeric: tabular-nums;
   color: var(--accent);

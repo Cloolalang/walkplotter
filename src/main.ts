@@ -91,6 +91,10 @@ const PROCESS_OVERLAY_SHIFT_STORAGE_KEY = 'walkplotter-process-overlay-shift-v1'
 let processOverlayShiftX = 0
 let processOverlayShiftY = 0
 
+const PROCESS_DOT_SCALE_STORAGE_KEY = 'walkplotter-process-dot-scale-v1'
+/** Scales Process overlay trail/RF dot radius (same range as Map pin size). */
+let processDotScale = 1
+
 /** Pan (px) and scale for the floor plan; CSS transform on #stage-inner. */
 let mapPanX = 0
 let mapPanY = 0
@@ -837,6 +841,20 @@ app.innerHTML = `
       <button type="button" class="btn" id="process-btn-zoom-in" title="Zoom in">+</button>
       <button type="button" class="btn" id="process-btn-zoom-reset" title="Reset pan and zoom">Reset view</button>
     </div>
+    <div class="pin-size-bar process-dot-size-bar" id="process-dot-size-bar" hidden>
+      <label class="pin-size-label" for="process-dot-size">Dot size</label>
+      <input
+        type="range"
+        id="process-dot-size"
+        min="25"
+        max="250"
+        step="5"
+        value="100"
+        disabled
+        aria-label="Process overlay dot size"
+      />
+      <span class="pin-size-pct" id="process-dot-size-pct">100%</span>
+    </div>
     <p class="hint process-mouse-hint" id="process-mouse-hint" hidden>
       Mouse: wheel to zoom · drag empty area to pan · while nudging: <strong>left-drag</strong> on empty space, or <strong>middle-drag</strong> / <strong>Alt+drag</strong> anywhere, to pan the view.
     </p>
@@ -967,6 +985,9 @@ const processCanvas = document.querySelector<HTMLCanvasElement>('#process-overla
 const processStage = document.querySelector<HTMLDivElement>('#process-stage')!
 const processStageInner = document.querySelector<HTMLDivElement>('#process-stage-inner')!
 const processZoomBar = document.querySelector<HTMLDivElement>('#process-zoom-bar')!
+const processDotSizeBar = document.querySelector<HTMLDivElement>('#process-dot-size-bar')!
+const processDotSizeRange = document.querySelector<HTMLInputElement>('#process-dot-size')!
+const processDotSizePctEl = document.querySelector<HTMLSpanElement>('#process-dot-size-pct')!
 const processZoomPctEl = document.querySelector<HTMLSpanElement>('#process-zoom-pct')!
 const processBtnZoomIn = document.querySelector<HTMLButtonElement>('#process-btn-zoom-in')!
 const processBtnZoomOut = document.querySelector<HTMLButtonElement>('#process-btn-zoom-out')!
@@ -1958,10 +1979,40 @@ function commitProcessOverlayShiftFromInputs(): void {
   drawProcessOverlay()
 }
 
+function loadProcessDotScaleFromStorage(): void {
+  processDotScale = 1
+  try {
+    const raw = localStorage.getItem(PROCESS_DOT_SCALE_STORAGE_KEY)
+    if (!raw) return
+    const o = JSON.parse(raw) as { scale?: unknown }
+    const s = Number(o.scale)
+    if (Number.isFinite(s)) processDotScale = clampPinDotScale(s)
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveProcessDotScaleToStorage(): void {
+  try {
+    localStorage.setItem(PROCESS_DOT_SCALE_STORAGE_KEY, JSON.stringify({ scale: processDotScale }))
+  } catch {
+    /* ignore */
+  }
+}
+
+function updateProcessDotSizeLabel(): void {
+  processDotSizePctEl.textContent = `${Math.round(processDotScale * 100)}%`
+}
+
+function syncProcessDotSizeControl(): void {
+  processDotSizeRange.value = String(Math.round(processDotScale * 100))
+  updateProcessDotSizeLabel()
+}
+
 function processTrailDotRadius(): number {
   const w = processCanvas.width / (window.devicePixelRatio || 1)
   const h = processCanvas.height / (window.devicePixelRatio || 1)
-  return Math.max(3, Math.min(w, h) / 80)
+  return Math.max(3, Math.min(w, h) / 80) * processDotScale
 }
 
 function findTrailHitIndex(clientX: number, clientY: number, dotR: number): number | null {
@@ -2245,7 +2296,7 @@ function drawProcessOverlay(): void {
 
   const showMetricOverlay = processHasPlOverlay() || processHasRssiOverlay()
   const hasTrail = processTrailEditable.length > 0
-  const dotR = Math.max(3, Math.min(w, h) / 80)
+  const dotR = Math.max(3, Math.min(w, h) / 80) * processDotScale
 
   if (showMetricOverlay) {
     updateProcessMetricWrapVisibility()
@@ -3193,6 +3244,8 @@ processFilePlan.addEventListener('change', () => {
     processPlaceholder.hidden = false
     processStage.classList.remove('has-image')
     processZoomBar.hidden = true
+    processDotSizeBar.hidden = true
+    processDotSizeRange.disabled = true
     processMouseHint.hidden = true
     resetProcessView()
     processStatus.textContent = 'Load floor plan and Walkplotter CSV to begin.'
@@ -3347,6 +3400,8 @@ processImg.addEventListener('load', () => {
   processPlaceholder.hidden = true
   processStage.classList.add('has-image')
   processZoomBar.hidden = false
+  processDotSizeBar.hidden = false
+  processDotSizeRange.disabled = false
   processMouseHint.hidden = false
   resetProcessView()
   syncProcessOverlayCanvas()
@@ -3410,6 +3465,8 @@ processCanvas.addEventListener('pointerup', onTrailPointerUp)
 processCanvas.addEventListener('pointercancel', onTrailPointerUp)
 loadProcessOverlayShiftFromStorage()
 syncProcessOverlayShiftInputs()
+loadProcessDotScaleFromStorage()
+syncProcessDotSizeControl()
 processShiftXInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftYInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftReset.addEventListener('click', () => {
@@ -3417,6 +3474,12 @@ processShiftReset.addEventListener('click', () => {
   processOverlayShiftY = 0
   syncProcessOverlayShiftInputs()
   saveProcessOverlayShiftToStorage()
+  drawProcessOverlay()
+})
+processDotSizeRange.addEventListener('input', () => {
+  processDotScale = clampPinDotScale(Number(processDotSizeRange.value) / 100)
+  updateProcessDotSizeLabel()
+  saveProcessDotScaleToStorage()
   drawProcessOverlay()
 })
 updateProcessFileSummary()
