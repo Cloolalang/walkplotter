@@ -17,6 +17,8 @@ export type EditableTrailRow = WalkplotterTrailRow & {
 export type PathLossRow = {
   time: string
   pathLoss: number
+  /** When set (e.g. RSSI CSV with `YYYY-M-D H:MM:SS` in the time column), merge uses this instead of trail test date + time-of-day. */
+  absoluteTimeMs?: number
 }
 
 export type MergedPlotPoint = {
@@ -53,6 +55,29 @@ export type TimestampSemantics = 'wall_clock' | 'elapsed_since_session_start'
 const HMS_DURATION_RE = /^\d+:\d{2}:\d{2}$/
 /** Wall-clock time: H:MM:SS with optional fractional seconds (e.g. `15:43:58.783`). */
 const HMS_WALL_RE = /^\d{1,2}:\d{2}:\d{2}(\.\d+)?$/
+/** Local wall date + time, e.g. `2026-4-15 15:41:58.783` (month/day need not be zero-padded). */
+const LOCAL_DT_WALL_RE =
+  /^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})(\.\d+)?$/
+
+/** Parse local calendar date + time-of-day to epoch ms; returns null if the string does not match. */
+export function parseLocalDateTimeWallMs(s: string): number | null {
+  const m = LOCAL_DT_WALL_RE.exec(s.trim())
+  if (!m) return null
+  const y = Number(m[1])
+  const mo = Number(m[2])
+  const d = Number(m[3])
+  const h = Number(m[4])
+  const mi = Number(m[5])
+  const secInt = Number(m[6])
+  let fracMs = 0
+  if (m[7]) {
+    const frac = parseFloat(m[7]!)
+    if (Number.isFinite(frac)) fracMs = Math.round(frac * 1000)
+  }
+  if (![y, mo, d, h, mi, secInt].every(Number.isFinite)) return null
+  const t = new Date(y, mo - 1, d, h, mi, secInt, fracMs).getTime()
+  return Number.isFinite(t) ? t : null
+}
 
 function parseCsvLine(line: string): string[] {
   const cells: string[] = []
@@ -294,11 +319,12 @@ export function parsePathLossCsv(text: string): PathLossRow[] {
 /**
  * RSSI log: header row with `time` / `rssi` (or `Time` / `RSSI`) columns (case-insensitive), or first two
  * columns as time then RSSI (dBm). Tab- or comma-separated; extra columns (e.g. lat/lon) are ignored.
- * Wall-clock times may include fractional seconds (`15:43:58.783`). Reuses `PathLossRow` with `pathLoss`
- * holding RSSI in dBm for merge.
+ * Time column may be time-of-day only (`15:43:58.783`) or full local date+time (`2026-4-15 15:41:58.783`).
+ * Reuses `PathLossRow` with `pathLoss` holding RSSI in dBm for merge.
  */
 export function parseRssiCsv(text: string): PathLossRow[] {
-  const lines = text.split(/\r?\n/)
+  const normalized = text.replace(/^\uFEFF/, '')
+  const lines = normalized.split(/\r?\n/)
   let timeIdx = 0
   let rssiIdx = 1
   let dataStart = 0
@@ -308,7 +334,8 @@ export function parseRssiCsv(text: string): PathLossRow[] {
     const parts = splitMetricLogLine(raw)
     const lower = parts.map((c) => c.toLowerCase())
     const ti = lower.indexOf('time')
-    const ri = lower.indexOf('rssi')
+    let ri = lower.indexOf('rssi')
+    if (ri < 0) ri = lower.indexOf('dbm')
     if (ti >= 0 && ri >= 0 && ti !== ri) {
       timeIdx = ti
       rssiIdx = ri
@@ -327,6 +354,11 @@ export function parseRssiCsv(text: string): PathLossRow[] {
     const time = parts[timeIdx]!
     const rssi = Number(parts[rssiIdx])
     if (!Number.isFinite(rssi)) continue
+    const abs = parseLocalDateTimeWallMs(time)
+    if (abs != null) {
+      out.push({ time, pathLoss: rssi, absoluteTimeMs: abs })
+      continue
+    }
     if (!HMS_WALL_RE.test(time) && !HMS_DURATION_RE.test(time)) continue
     out.push({ time, pathLoss: rssi })
   }
@@ -389,7 +421,10 @@ export function mergeByNearestTime(
 
   const rfMs = rf
     .map((r) => ({
-      t: rowTimeMs(testDateYmd, r.time, timeOpts),
+      t:
+        r.absoluteTimeMs != null && Number.isFinite(r.absoluteTimeMs)
+          ? r.absoluteTimeMs
+          : rowTimeMs(testDateYmd, r.time, timeOpts),
       pl: r.pathLoss,
     }))
     .filter((x) => Number.isFinite(x.t))
