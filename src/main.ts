@@ -1433,6 +1433,7 @@ function processCanvasBlocksStageGestures(): boolean {
  * while nudging (same as middle; left on a trail dot still nudges).
  */
 function processMouseViewPanAllowed(e: PointerEvent): boolean {
+  if (processHeatmapDrawBoundary) return false
   if (e.pointerType !== 'mouse') return false
   if (e.button === 1) return true
   if (e.button === 0 && e.altKey) return true
@@ -2544,11 +2545,32 @@ function findTrailHitIndex(clientX: number, clientY: number, dotR: number): numb
 
 function clientToProcessBasePixel(clientX: number, clientY: number): { x: number; y: number } | null {
   if (!processImg.naturalWidth) return null
-  const hit = clientToImagePixel(clientX, clientY, processImg)
-  if (!hit.ok) return null
+  const local = clientToElementLocal(clientX, clientY, processStageInner)
+  if (!local) return null
+  const imgLocalX = local.x - processImg.offsetLeft
+  const imgLocalY = local.y - processImg.offsetTop
+  const bw = processImg.offsetWidth
+  const bh = processImg.offsetHeight
+  const iw = processImg.naturalWidth
+  const ih = processImg.naturalHeight
+  if (bw <= 0 || bh <= 0 || iw <= 0 || ih <= 0) return null
+  const outsideTol = 12
+  if (
+    imgLocalX < -outsideTol ||
+    imgLocalX > bw + outsideTol ||
+    imgLocalY < -outsideTol ||
+    imgLocalY > bh + outsideTol
+  ) {
+    return null
+  }
+  // Accept near-edge clicks by clamping into image bounds.
+  const lx = Math.max(0, Math.min(bw, imgLocalX))
+  const ly = Math.max(0, Math.min(bh, imgLocalY))
+  const x = (lx / bw) * iw
+  const y = (ly / bh) * ih
   return clampPixelToImage(
-    hit.pixel.x - processOverlayShiftX,
-    hit.pixel.y - processOverlayShiftY,
+    x - processOverlayShiftX,
+    y - processOverlayShiftY,
     processImg.naturalWidth,
     processImg.naturalHeight
   )
@@ -4535,6 +4557,24 @@ function onProcessStagePointerDown(e: PointerEvent): void {
   }
   if (e.pointerType === 'mouse' && e.button === 1) {
     e.preventDefault()
+  }
+  if (processHeatmapDrawBoundary && e.button === 0 && !e.altKey) {
+    const t = e.target as Node
+    const onOverlayCanvas = t === processCanvas || processCanvas.contains(t)
+    if (!onOverlayCanvas) {
+      const px = clientToProcessBasePixel(e.clientX, e.clientY)
+      if (px && !processHeatmapBoundaryClosed) {
+        processHeatmapBoundaryPoints.push(px)
+        if (processHeatmapBoundaryPoints.length >= 3) {
+          processHeatmapUseBoundary = processHeatmapUseBoundaryInput.checked
+        }
+        syncProcessHeatmapControls()
+        saveProcessHeatmapToStorage()
+        drawProcessOverlay()
+      }
+      e.preventDefault()
+      return
+    }
   }
   processPointerPositions.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY })
   if (processPointerPositions.size >= 2) {
