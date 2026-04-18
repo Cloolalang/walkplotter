@@ -98,8 +98,8 @@ let currentTab: 'map' | 'controls' | 'process' | 'rssi_graph' = 'map'
 let processRssiRollingEnabled = false
 let processRssiRollingWindow = 5
 let processRssiLeeEnabled = false
-let processRssiLeeFreqMhz = 2400
-let processRssiLeeSpeedMps = 1
+let processRssiLeeFreqMhz = 2640
+let processRssiLeeSpeedMps = 1.4
 
 const PROCESS_OVERLAY_SHIFT_STORAGE_KEY = 'walkplotter-process-overlay-shift-v1'
 /** Draw trail and RF overlay at (x + Δx, y + Δy) in intrinsic image pixels (display-only until you nudge and save). */
@@ -1051,7 +1051,7 @@ app.innerHTML = `
           min="100"
           max="10000"
           step="1"
-          value="2400"
+          value="2640"
           inputmode="decimal"
         />
       </label>
@@ -1063,7 +1063,7 @@ app.innerHTML = `
           min="0.05"
           max="5"
           step="0.05"
-          value="1"
+          value="1.4"
           inputmode="decimal"
         />
       </label>
@@ -3894,11 +3894,11 @@ function clampRssiRollingWindow(v: number): number {
 }
 
 function clampRssiLeeFreqMhz(v: number): number {
-  return Math.max(100, Math.min(10000, Number.isFinite(v) ? v : 2400))
+  return Math.max(100, Math.min(10000, Number.isFinite(v) ? v : 2640))
 }
 
 function clampRssiLeeSpeedMps(v: number): number {
-  return Math.max(0.05, Math.min(5, Number.isFinite(v) ? v : 1))
+  return Math.max(0.05, Math.min(5, Number.isFinite(v) ? v : 1.4))
 }
 
 function applyRssiRollingAverage(rows: PathLossRow[], windowSize: number): PathLossRow[] {
