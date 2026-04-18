@@ -1,9 +1,27 @@
 /**
- * Single-file Process tab snapshot: floor plan image + Walkplotter CSV + path-loss CSV.
+ * Single-file Process tab snapshot: map image + Walkplotter CSV + path-loss and/or RSSI CSV.
  * Versioned JSON so we can extend fields later.
  */
 
 export const PROCESS_BUNDLE_VERSION = 1 as const
+
+export type ProcessBundleSettingsV1 = {
+  overlayShiftPx?: { x: number; y: number }
+  flip?: { x: boolean; y: boolean }
+  dotScale?: number
+  rssiOffsetDb?: number
+  plotMetric?: 'path_loss' | 'rssi'
+  show?: {
+    pointLabels?: boolean
+    route?: boolean
+    colorTrail?: boolean
+  }
+  fspl?: {
+    enabled?: boolean
+    measuredMhz?: number
+    estimateMhz?: number
+  }
+}
 
 export type ProcessBundleV1 = {
   walkplotterBundleVersion: typeof PROCESS_BUNDLE_VERSION
@@ -20,10 +38,19 @@ export type ProcessBundleV1 = {
   walkplotterCsv: string
   /** Full path-loss CSV text */
   pathLossCsv: string
+  /** Optional full RSSI CSV text (for RSSI-only or combined workflows). */
+  rssiCsv?: string
+  /** Optional Process tab display/plot settings. */
+  settings?: ProcessBundleSettingsV1
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x)
+}
+
+function asFiniteNumberOrUndefined(x: unknown): number | undefined {
+  const n = Number(x)
+  return Number.isFinite(n) ? n : undefined
 }
 
 export function parseProcessBundleJson(text: string): ProcessBundleV1 | null {
@@ -38,6 +65,7 @@ export function parseProcessBundleJson(text: string): ProcessBundleV1 | null {
   if (o.app !== 'walkplotter') return null
   if (typeof o.savedAt !== 'string') return null
   if (typeof o.walkplotterCsv !== 'string' || typeof o.pathLossCsv !== 'string') return null
+  if (o.rssiCsv != null && typeof o.rssiCsv !== 'string') return null
   const fp = o.floorPlan
   if (!isRecord(fp)) return null
   if (
@@ -47,6 +75,85 @@ export function parseProcessBundleJson(text: string): ProcessBundleV1 | null {
   ) {
     return null
   }
+  let settings: ProcessBundleSettingsV1 | undefined
+  if (o.settings != null) {
+    if (!isRecord(o.settings)) return null
+    const out: ProcessBundleSettingsV1 = {}
+    const s = o.settings
+
+    if (s.overlayShiftPx != null) {
+      if (!isRecord(s.overlayShiftPx)) return null
+      const x = asFiniteNumberOrUndefined(s.overlayShiftPx.x)
+      const y = asFiniteNumberOrUndefined(s.overlayShiftPx.y)
+      if (x == null || y == null) return null
+      out.overlayShiftPx = { x, y }
+    }
+
+    if (s.flip != null) {
+      if (!isRecord(s.flip)) return null
+      const x = s.flip.x
+      const y = s.flip.y
+      if (typeof x !== 'boolean' || typeof y !== 'boolean') return null
+      out.flip = { x, y }
+    }
+
+    if (s.dotScale != null) {
+      const dotScale = asFiniteNumberOrUndefined(s.dotScale)
+      if (dotScale == null) return null
+      out.dotScale = dotScale
+    }
+    if (s.rssiOffsetDb != null) {
+      const rssiOffsetDb = asFiniteNumberOrUndefined(s.rssiOffsetDb)
+      if (rssiOffsetDb == null) return null
+      out.rssiOffsetDb = rssiOffsetDb
+    }
+
+    if (s.plotMetric != null) {
+      if (s.plotMetric !== 'path_loss' && s.plotMetric !== 'rssi') return null
+      out.plotMetric = s.plotMetric
+    }
+
+    if (s.show != null) {
+      if (!isRecord(s.show)) return null
+      const show: NonNullable<ProcessBundleSettingsV1['show']> = {}
+      if (s.show.pointLabels != null) {
+        if (typeof s.show.pointLabels !== 'boolean') return null
+        show.pointLabels = s.show.pointLabels
+      }
+      if (s.show.route != null) {
+        if (typeof s.show.route !== 'boolean') return null
+        show.route = s.show.route
+      }
+      if (s.show.colorTrail != null) {
+        if (typeof s.show.colorTrail !== 'boolean') return null
+        show.colorTrail = s.show.colorTrail
+      }
+      out.show = show
+    }
+
+    if (s.fspl != null) {
+      if (!isRecord(s.fspl)) return null
+      const fspl: NonNullable<ProcessBundleSettingsV1['fspl']> = {}
+      if (s.fspl.enabled != null) {
+        if (typeof s.fspl.enabled !== 'boolean') return null
+        fspl.enabled = s.fspl.enabled
+      }
+      if (s.fspl.measuredMhz != null) {
+        const measuredMhz = asFiniteNumberOrUndefined(s.fspl.measuredMhz)
+        if (measuredMhz == null) return null
+        fspl.measuredMhz = measuredMhz
+      }
+      if (s.fspl.estimateMhz != null) {
+        const estimateMhz = asFiniteNumberOrUndefined(s.fspl.estimateMhz)
+        if (estimateMhz == null) return null
+        fspl.estimateMhz = estimateMhz
+      }
+      out.fspl = fspl
+    }
+
+    settings = out
+  }
+
   return {
     walkplotterBundleVersion: 1,
     app: 'walkplotter',
@@ -58,6 +165,8 @@ export function parseProcessBundleJson(text: string): ProcessBundleV1 | null {
     },
     walkplotterCsv: o.walkplotterCsv,
     pathLossCsv: o.pathLossCsv,
+    ...(typeof o.rssiCsv === 'string' ? { rssiCsv: o.rssiCsv } : {}),
+    ...(settings ? { settings } : {}),
   }
 }
 

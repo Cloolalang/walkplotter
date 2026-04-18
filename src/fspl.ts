@@ -20,14 +20,14 @@ export function fsplPathLossNegativeConvention(samples: readonly { pathLoss: num
   return sum / samples.length < 0
 }
 
-/** 700 … 2300 MHz in 50 MHz steps (inclusive). */
+/** 700 … 2700 MHz in 50 MHz steps (inclusive). */
 export function fsplDisplayFrequencyOptionsMhz(): number[] {
   const out: number[] = []
-  for (let m = 700; m <= 2300; m += 50) out.push(m)
+  for (let m = 700; m <= 2700; m += 50) out.push(m)
   return out
 }
 
-/** Walk test is always at 2.4 GHz; pick the center you use (ISM / ch 14). */
+/** Measured frequency options match the estimate range for flexible workflows. */
 export function fsplMeasuredFrequencyOptionsMhz(): number[] {
-  return [2400, 2474]
+  return fsplDisplayFrequencyOptionsMhz()
 }

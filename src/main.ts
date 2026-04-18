@@ -12,6 +12,7 @@ import {
   uint8ArrayToBase64,
   PROCESS_BUNDLE_VERSION,
   type ProcessBundleV1,
+  type ProcessBundleSettingsV1,
 } from './processBundle'
 import {
   DEFAULT_MAX_MATCH_MS,
@@ -73,11 +74,17 @@ let processPathLossCsvText = ''
 /** Cached RSSI CSV (`time` + `rssi` columns); merged like path loss but separate colour scale. */
 let processRssiCsvText = ''
 let processRssiMergedPoints: MergedPlotPoint[] = []
+/** Unscaled RSSI merge result; FSPL UI derives `processRssiMergedPoints` from this. */
+let processRssiMergedPointsRaw: MergedPlotPoint[] = []
 let processRssiUnmatchedTrailPoints: UnmatchedTrailPoint[] = []
 type ProcessPlotMetric = 'path_loss' | 'rssi'
-let processPlotMetric: ProcessPlotMetric = 'path_loss'
+let processPlotMetric: ProcessPlotMetric = 'rssi'
 /** When set, file summary labels come from a loaded bundle until the user picks new files. */
-let processBundleSummaryOverride: { plan: string; walk: string; pl: string } | null = null
+let processBundleSummaryOverride: { plan: string; walk: string; pl: string; rssi: string } | null = null
+/** Process map loaded from recents has no File object; keep a display name for the summary row. */
+let processRecentMapNameOverride: string | null = null
+/** Loaded bundle settings are applied after Process map image layout is ready. */
+let pendingBundleSettings: ProcessBundleSettingsV1 | null = null
 /** Walkplotter trail loaded in Process tab; x/y edits are saved via Save Walkplotter CSV. */
 let processWalkPreamble = ''
 let processWalkTail = ''
@@ -90,10 +97,17 @@ const PROCESS_OVERLAY_SHIFT_STORAGE_KEY = 'walkplotter-process-overlay-shift-v1'
 /** Draw trail and RF overlay at (x + Δx, y + Δy) in intrinsic image pixels (display-only until you nudge and save). */
 let processOverlayShiftX = 0
 let processOverlayShiftY = 0
+const PROCESS_PLAN_FLIP_STORAGE_KEY = 'walkplotter-process-plan-flip-v1'
+/** Process floor plan display orientation: mirror horizontally/vertically when an upload appears flipped. */
+let processPlanFlipX = false
+let processPlanFlipY = false
 
 const PROCESS_DOT_SCALE_STORAGE_KEY = 'walkplotter-process-dot-scale-v1'
 /** Scales Process overlay trail/RF dot radius (same range as Map pin size). */
 let processDotScale = 1
+const PROCESS_RSSI_OFFSET_STORAGE_KEY = 'walkplotter-process-rssi-offset-v1'
+/** Applies a global dB offset to all RSSI samples before FSPL scaling (what-if calibration). */
+let processRssiOffsetDb = 0
 
 /** Pan (px) and scale for the floor plan; CSS transform on #stage-inner. */
 let mapPanX = 0
@@ -547,7 +561,7 @@ app.innerHTML = `
   </div>
 
   <div class="tab-panel tab-panel--map" id="panel-map" role="tabpanel" aria-labelledby="tab-map">
-    <p class="hint hint-map" id="hint-map">Open the Controls tab to load a floor plan.</p>
+    <p class="hint hint-map" id="hint-map">Open the Controls tab to load a map.</p>
     <div class="map-quick-bar" id="map-quick-bar" hidden>
       <button type="button" class="btn" id="btn-pause" disabled>Pause</button>
       <button type="button" class="btn" id="btn-undo" disabled>Undo trail</button>
@@ -577,7 +591,7 @@ app.innerHTML = `
     <div class="stage-wrap">
       <div class="stage" id="stage">
         <div class="stage-inner" id="stage-inner">
-          <img id="plan" alt="Floor plan" />
+          <img id="plan" alt="Map" />
           <canvas id="overlay" />
         </div>
       </div>
@@ -587,7 +601,7 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--controls" id="panel-controls" role="tabpanel" aria-labelledby="tab-controls" hidden>
     <div class="controls-title-bar" role="banner">
-      <span class="controls-title-text">Walkplotter - version 2.5 March 2026</span>
+      <span class="controls-title-text">Walkplotter - version 2.6 April 2026</span>
       <a
         class="controls-title-link"
         href="https://github.com/Cloolalang/walkplotter#readme"
@@ -597,7 +611,7 @@ app.innerHTML = `
     </div>
     <header class="toolbar">
       <label class="btn btn-primary">
-        Choose floor plan
+        Choose map
         <input id="file" type="file" accept="image/*" hidden />
       </label>
       <div class="mode-switch" role="group" aria-label="Placement mode">
@@ -616,8 +630,8 @@ app.innerHTML = `
       </label>
     </header>
     <div class="recent-floor-plans" id="recent-floor-plans-wrap" hidden>
-      <span class="recent-floor-plans-label">Recent plans</span>
-      <ul class="recent-floor-plans-list" id="recent-floor-plans-list" aria-label="Recently opened floor plans"></ul>
+      <span class="recent-floor-plans-label">Recent maps</span>
+      <ul class="recent-floor-plans-list" id="recent-floor-plans-list" aria-label="Recently opened maps"></ul>
     </div>
     <div class="interp-bar" id="interp-bar">
       <label class="interp-label" for="interp-step">Interpolation step (seconds)</label>
@@ -668,12 +682,12 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--process" id="panel-process" role="tabpanel" aria-labelledby="tab-process" hidden>
     <p class="hint process-hint">
-      Load the <strong>floor plan</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss in <strong>dB</strong>) and/or <strong>RSSI</strong> CSV (columns <code>time</code>, <code>rssi</code> in <strong>dBm</strong>) and tap <strong>Plot overlay</strong>. Nearest-time match within
-      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>. After plotting, use <strong>Save process bundle</strong> to name and download one JSON file with plan, walk, and path loss; <strong>Load bundle</strong> restores them with a single file pick (large plans make a large file).
+      Load the <strong>map</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss in <strong>dB</strong>) and/or <strong>RSSI</strong> CSV (columns <code>time</code>, <code>rssi</code> in <strong>dBm</strong>) and tap <strong>Plot overlay</strong>. Nearest-time match within
+      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>. After plotting, use <strong>Save process bundle</strong> to name and download one JSON file with map, walk, path loss and/or RSSI, plus Process view/settings; <strong>Load bundle</strong> restores them with a single file pick (large maps make a large file).
     </p>
     <div class="process-toolbar">
       <label class="btn btn-primary process-file-btn process-file-pick">
-        Floor plan
+        Map
         <input id="process-file-plan" type="file" accept="image/*" class="process-file-input-overlay" />
       </label>
       <label class="btn btn-primary process-file-btn process-file-pick">
@@ -696,10 +710,10 @@ app.innerHTML = `
         </select>
       </label>
       <button type="button" class="btn btn-primary process-btn-run" id="process-btn-plot" title="Merge path loss and/or RSSI logs with the trail and draw">Plot overlay</button>
-      <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss / RSSI overlay to edit the trail again">
+      <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss / RSSI overlay">
         Clear overlay
       </button>
-      <button type="button" class="btn" id="process-btn-save-bundle" disabled title="Download one JSON file with floor plan + Walkplotter CSV + path loss CSV">
+      <button type="button" class="btn" id="process-btn-save-bundle" disabled title="Download one JSON file with map + Walkplotter CSV + path loss and/or RSSI CSV">
         Save process bundle
       </button>
       <label class="btn process-file-btn process-file-pick" title="Load a JSON bundle from Save process bundle">
@@ -720,7 +734,7 @@ app.innerHTML = `
       </label>
     </div>
     <div class="process-toolbar process-toolbar--fspl" id="process-fspl-wrap" hidden>
-      <label class="toolbar-toggle process-toolbar-toggle process-fspl-toggle" title="Free space vs 2.4 GHz measurement. Positive PL (dB): add 20·log₁₀(f_est/f_meas). Negative PL values (some gear): correction is sign-flipped so lower frequency still shows less loss.">
+      <label class="toolbar-toggle process-toolbar-toggle process-fspl-toggle" title="Free-space frequency scaling. Positive PL (dB): add 20·log₁₀(f_est/f_meas). Negative PL values (some gear): correction is sign-flipped so lower frequency still shows less loss.">
         <input type="checkbox" id="process-fspl-enable" disabled />
         FSPL frequency estimate
       </label>
@@ -730,11 +744,32 @@ app.innerHTML = `
         <span class="process-fspl-unit">MHz</span></label
       >
       <label class="process-fspl-field" for="process-fspl-ref"
-        ><span class="process-fspl-field-label">Measured at (2.4 GHz)</span>
+        ><span class="process-fspl-field-label">Measured at</span>
         <select id="process-fspl-ref" class="process-fspl-select" disabled aria-label="Actual walk test frequency in MHz"></select>
         <span class="process-fspl-unit">MHz</span></label
       >
       <span class="process-fspl-delta" id="process-fspl-delta" aria-live="polite"></span>
+    </div>
+    <div class="process-toolbar process-toolbar--rssi-adjust" id="process-rssi-adjust-wrap" hidden>
+      <span
+        class="process-shift-lead"
+        title="Adds this offset to every plotted RSSI sample (dB) before FSPL scaling is applied."
+        >RSSI offset</span
+      >
+      <label class="process-shift-field" for="process-rssi-offset"
+        ><span class="process-shift-label">ΔRSSI dB</span>
+        <input
+          type="number"
+          id="process-rssi-offset"
+          class="process-shift-input"
+          step="0.5"
+          value="0"
+          inputmode="decimal"
+        />
+      </label>
+      <button type="button" class="btn" id="process-rssi-offset-reset" title="Set RSSI offset to 0 dB">
+        Reset RSSI offset
+      </button>
     </div>
     <div class="process-toolbar process-toolbar--adjust">
       <label class="toolbar-toggle process-toolbar-toggle" title="Drag trail dots to adjust image pixel coordinates; use Save when ready">
@@ -767,17 +802,39 @@ app.innerHTML = `
       >
       <label class="process-shift-field" for="process-shift-x"
         ><span class="process-shift-label">Δx px</span>
-        <input type="number" id="process-shift-x" class="process-shift-input" step="1" value="0" />
+        <input type="number" id="process-shift-x" class="process-shift-input" step="10" value="0" />
       </label>
       <label class="process-shift-field" for="process-shift-y"
         ><span class="process-shift-label">Δy px</span>
-        <input type="number" id="process-shift-y" class="process-shift-input" step="1" value="0" />
+        <input type="number" id="process-shift-y" class="process-shift-input" step="10" value="0" />
       </label>
       <button type="button" class="btn" id="process-shift-reset" title="Clear overlay shift (0, 0)">Reset shift</button>
     </div>
+    <div class="process-toolbar process-toolbar--flip" id="process-plan-flip-wrap">
+      <span
+        class="process-shift-lead"
+        title="Mirror the Process map if it appears reversed on this device. This only changes display orientation; CSV coordinates are unchanged."
+        >Map orientation</span
+      >
+      <label class="toolbar-toggle process-toolbar-toggle" title="Mirror the map left-to-right in the Process view">
+        <input type="checkbox" id="process-flip-x" />
+        Flip left/right
+      </label>
+      <label class="toolbar-toggle process-toolbar-toggle" title="Mirror the map top-to-bottom in the Process view">
+        <input type="checkbox" id="process-flip-y" />
+        Flip top/bottom
+      </label>
+      <button type="button" class="btn" id="process-flip-reset" title="Use the normal map orientation">
+        Reset orientation
+      </button>
+    </div>
+    <div class="recent-floor-plans" id="process-recent-floor-plans-wrap" hidden>
+      <span class="recent-floor-plans-label">Recent maps</span>
+      <ul class="recent-floor-plans-list" id="process-recent-floor-plans-list" aria-label="Recently opened maps for Process"></ul>
+    </div>
     <div class="process-files-summary" id="process-files-summary" aria-live="polite">
       <div class="process-file-row">
-        <span class="process-file-kind">Floor plan</span>
+        <span class="process-file-kind">Map</span>
         <span class="process-file-name" id="process-filename-plan">—</span>
       </div>
       <div class="process-file-row">
@@ -793,7 +850,7 @@ app.innerHTML = `
         <span class="process-file-name" id="process-filename-rssi">—</span>
       </div>
     </div>
-    <p class="hint process-status" id="process-status">Load floor plan and Walkplotter CSV to begin.</p>
+    <p class="hint process-status" id="process-status">Load map and Walkplotter CSV to begin.</p>
     <div class="process-legend" id="process-legend" hidden></div>
     <div class="process-histogram-wrap" id="process-histogram-wrap" hidden>
       <p class="process-histogram-title" id="process-histogram-title">Path loss histogram (20 dB bins, down to −120 dB)</p>
@@ -861,11 +918,11 @@ app.innerHTML = `
     <div class="process-stage-wrap">
       <div class="process-stage" id="process-stage">
         <div class="process-stage-inner" id="process-stage-inner">
-          <img id="process-plan" alt="Floor plan for processing" />
+          <img id="process-plan" alt="Map for processing" />
           <canvas id="process-overlay" />
         </div>
       </div>
-      <p class="empty process-placeholder" id="process-placeholder">Load a floor plan image to see the overlay.</p>
+      <p class="empty process-placeholder" id="process-placeholder">Load a map image to see the overlay.</p>
     </div>
   </div>
 
@@ -881,7 +938,7 @@ app.innerHTML = `
       </div>
       <label class="save-dialog-check">
         <input type="checkbox" id="save-include-jpg" />
-        <span id="save-include-jpg-text">Also save a map snapshot (floor plan + trail + POI markers) as JPG</span>
+        <span id="save-include-jpg-text">Also save a map snapshot (map + trail + POI markers) as JPG</span>
       </label>
       <label class="save-dialog-label" id="jpg-filename-wrap" hidden>
         JPG file name
@@ -921,7 +978,7 @@ app.innerHTML = `
     <form id="bundle-save-form">
       <h2 class="save-dialog-title">Save process bundle</h2>
       <p class="save-dialog-desc">
-        Choose a file name for the JSON bundle (floor plan + Walkplotter CSV + path loss CSV).
+        Choose a file name for the JSON bundle (map + Walkplotter CSV + path loss and/or RSSI CSV + Process view/settings).
         <code>.json</code> is added if missing.
       </p>
       <label class="save-dialog-label">
@@ -948,6 +1005,8 @@ const canvas = document.querySelector<HTMLCanvasElement>('#overlay')!
 const fileInput = document.querySelector<HTMLInputElement>('#file')!
 const recentFloorPlansWrap = document.querySelector<HTMLDivElement>('#recent-floor-plans-wrap')!
 const recentFloorPlansList = document.querySelector<HTMLUListElement>('#recent-floor-plans-list')!
+const processRecentFloorPlansWrap = document.querySelector<HTMLDivElement>('#process-recent-floor-plans-wrap')!
+const processRecentFloorPlansList = document.querySelector<HTMLUListElement>('#process-recent-floor-plans-list')!
 const btnPause = document.querySelector<HTMLButtonElement>('#btn-pause')!
 const btnStop = document.querySelector<HTMLButtonElement>('#btn-stop')!
 const btnDownload = document.querySelector<HTMLButtonElement>('#btn-download')!
@@ -1008,6 +1067,9 @@ const processFsplEnable = document.querySelector<HTMLInputElement>('#process-fsp
 const processFsplRef = document.querySelector<HTMLSelectElement>('#process-fspl-ref')!
 const processFsplTarget = document.querySelector<HTMLSelectElement>('#process-fspl-target')!
 const processFsplDelta = document.querySelector<HTMLSpanElement>('#process-fspl-delta')!
+const processRssiAdjustWrap = document.querySelector<HTMLDivElement>('#process-rssi-adjust-wrap')!
+const processRssiOffsetInput = document.querySelector<HTMLInputElement>('#process-rssi-offset')!
+const processRssiOffsetReset = document.querySelector<HTMLButtonElement>('#process-rssi-offset-reset')!
 const processNudgeTrail = document.querySelector<HTMLInputElement>('#process-nudge-trail')!
 const processNudgeSnap = document.querySelector<HTMLSelectElement>('#process-nudge-snap')!
 const processResetTrail = document.querySelector<HTMLButtonElement>('#process-reset-trail')!
@@ -1016,6 +1078,9 @@ const processSaveWalkOriginal = document.querySelector<HTMLButtonElement>('#proc
 const processShiftXInput = document.querySelector<HTMLInputElement>('#process-shift-x')!
 const processShiftYInput = document.querySelector<HTMLInputElement>('#process-shift-y')!
 const processShiftReset = document.querySelector<HTMLButtonElement>('#process-shift-reset')!
+const processFlipXInput = document.querySelector<HTMLInputElement>('#process-flip-x')!
+const processFlipYInput = document.querySelector<HTMLInputElement>('#process-flip-y')!
+const processFlipReset = document.querySelector<HTMLButtonElement>('#process-flip-reset')!
 const processStatus = document.querySelector<HTMLParagraphElement>('#process-status')!
 const processFilenamePlan = document.querySelector<HTMLSpanElement>('#process-filename-plan')!
 const processFilenameWalk = document.querySelector<HTMLSpanElement>('#process-filename-walk')!
@@ -1760,7 +1825,7 @@ function updateProcessHistogramTable(): void {
   const rangeLabel = rssiView ? formatRssiBinLabel : formatPathLossBinLabel
   const rangeTh = rssiView ? 'Range (dBm)' : 'Range (dB)'
   processHistogramTitle.textContent = rssiView
-    ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm)`
+    ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm) (sample rate decimated to 1/second)`
     : `Path loss histogram (${PROCESS_HIST_BIN_WIDTH_DB} dB bins, down to −120 dB)`
   processHistogramRangeTh.textContent = rangeTh
   processHistogramPie.setAttribute(
@@ -1802,7 +1867,9 @@ function fillFsplSelectOptions(): void {
 }
 
 function updateProcessFsplDeltaLabel(): void {
-  if (processMergedPointsRaw.length === 0) {
+  const hasPlRaw = processMergedPointsRaw.length > 0
+  const hasRssiRaw = processRssiMergedPointsRaw.length > 0
+  if (!hasPlRaw && !hasRssiRaw) {
     processFsplDelta.textContent = ''
     return
   }
@@ -1818,6 +1885,17 @@ function updateProcessFsplDeltaLabel(): void {
   }
   const d = fsplPathLossDeltaDb(fEst, fMeas)
   const ad = Math.abs(d)
+  const rssiView = (processMetricIsRssiView() && hasRssiRaw) || (!hasPlRaw && hasRssiRaw)
+  if (rssiView) {
+    if (d < 0) {
+      processFsplDelta.textContent = `At ${fEst} MHz, RSSI is ~${ad.toFixed(2)} dB higher than at ${fMeas} MHz (free space).`
+    } else if (d > 0) {
+      processFsplDelta.textContent = `At ${fEst} MHz, RSSI is ~${ad.toFixed(2)} dB lower than at ${fMeas} MHz (free space).`
+    } else {
+      processFsplDelta.textContent = 'Same frequency — no change.'
+    }
+    return
+  }
   const neg = fsplPathLossNegativeConvention(processMergedPointsRaw)
   const negNote = neg ? ' CSV uses negative path loss — scaled so lower f → less loss (less negative).' : ''
   if (d < 0) {
@@ -1830,8 +1908,11 @@ function updateProcessFsplDeltaLabel(): void {
 }
 
 function rebuildProcessMergedFromFspl(): void {
-  if (processMergedPointsRaw.length === 0) {
+  const hasPlRaw = processMergedPointsRaw.length > 0
+  const hasRssiRaw = processRssiMergedPointsRaw.length > 0
+  if (!hasPlRaw && !hasRssiRaw) {
     processMergedPoints = []
+    processRssiMergedPoints = []
     updateProcessFsplDeltaLabel()
     return
   }
@@ -1844,21 +1925,39 @@ function rebuildProcessMergedFromFspl(): void {
     fMeas > 0 &&
     fEst > 0
   const deltaRaw = use ? fsplPathLossDeltaDb(fEst, fMeas) : 0
-  const negConv = fsplPathLossNegativeConvention(processMergedPointsRaw)
-  const delta = negConv ? -deltaRaw : deltaRaw
-  processMergedPoints = processMergedPointsRaw.map((p) => ({
-    ...p,
-    pathLoss: p.pathLoss + delta,
-  }))
+  if (hasPlRaw) {
+    const negConv = fsplPathLossNegativeConvention(processMergedPointsRaw)
+    const delta = negConv ? -deltaRaw : deltaRaw
+    processMergedPoints = processMergedPointsRaw.map((p) => ({
+      ...p,
+      pathLoss: p.pathLoss + delta,
+    }))
+  } else {
+    processMergedPoints = []
+  }
+  if (hasRssiRaw) {
+    const deltaRssi = -deltaRaw
+    const offsetRssi = processRssiOffsetDb
+    processRssiMergedPoints = processRssiMergedPointsRaw.map((p) => ({
+      ...p,
+      pathLoss: p.pathLoss + offsetRssi + deltaRssi,
+    }))
+  } else {
+    processRssiMergedPoints = []
+  }
   updateProcessFsplDeltaLabel()
 }
 
 function updateProcessFsplChrome(): void {
-  const has = processMergedPointsRaw.length > 0
-  processFsplWrap.hidden = !has || processMetricIsRssiView()
+  const has = processMergedPointsRaw.length > 0 || processRssiMergedPointsRaw.length > 0
+  const hasRssi = processRssiMergedPointsRaw.length > 0
+  processFsplWrap.hidden = !has
   processFsplEnable.disabled = !has
   processFsplRef.disabled = !has
   processFsplTarget.disabled = !has
+  processRssiAdjustWrap.hidden = !hasRssi
+  processRssiOffsetInput.disabled = !hasRssi
+  processRssiOffsetReset.disabled = !hasRssi
   if (!has) {
     processFsplDelta.textContent = ''
   }
@@ -1869,7 +1968,9 @@ function updateProcessBundleButtons(): void {
   const hasTrail = processTrailEditable.length > 0
   const hasPl =
     processPathLossCsvText.trim().length > 0 || Boolean(processFilePl.files?.[0])
-  processBtnSaveBundle.disabled = !(hasPlan && hasTrail && hasPl)
+  const hasRssi =
+    processRssiCsvText.trim().length > 0 || Boolean(processFileRssi.files?.[0])
+  processBtnSaveBundle.disabled = !(hasPlan && hasTrail && (hasPl || hasRssi))
 }
 
 function updateProcessFileSummary(): void {
@@ -1877,12 +1978,12 @@ function updateProcessFileSummary(): void {
     processFilenamePlan.textContent = processBundleSummaryOverride.plan
     processFilenameWalk.textContent = processBundleSummaryOverride.walk
     processFilenamePl.textContent = processBundleSummaryOverride.pl
-    processFilenameRssi.textContent = '—'
+    processFilenameRssi.textContent = processBundleSummaryOverride.rssi
     updateProcessBundleButtons()
     return
   }
   const label = (f: File | undefined) => f?.name ?? '—'
-  processFilenamePlan.textContent = label(processFilePlan.files?.[0])
+  processFilenamePlan.textContent = processRecentMapNameOverride ?? label(processFilePlan.files?.[0])
   processFilenameWalk.textContent = label(processFileWalk.files?.[0])
   processFilenamePl.textContent = label(processFilePl.files?.[0])
   processFilenameRssi.textContent = label(processFileRssi.files?.[0])
@@ -1901,9 +2002,12 @@ function clearProcessTrailState(): void {
   processPathLossCsvText = ''
   processRssiCsvText = ''
   processRssiMergedPoints = []
+  processRssiMergedPointsRaw = []
   processRssiUnmatchedTrailPoints = []
-  processPlotMetric = 'path_loss'
+  processPlotMetric = 'rssi'
   processBundleSummaryOverride = null
+  processRecentMapNameOverride = null
+  pendingBundleSettings = null
   processTrailDragIndex = null
   processNudgeTrail.checked = false
   processNudgeSnap.value = 'off'
@@ -1938,6 +2042,12 @@ function processImgToOverlayLocal(ix: number, iy: number): { x: number; y: numbe
   )
 }
 
+/** Apply current Process flip orientation to the floor plan element. */
+function applyProcessPlanFlipCss(): void {
+  processImg.classList.toggle('process-plan--flip-x', processPlanFlipX)
+  processImg.classList.toggle('process-plan--flip-y', processPlanFlipY)
+}
+
 function loadProcessOverlayShiftFromStorage(): void {
   processOverlayShiftX = 0
   processOverlayShiftY = 0
@@ -1965,18 +2075,146 @@ function saveProcessOverlayShiftToStorage(): void {
   }
 }
 
+function loadProcessPlanFlipFromStorage(): void {
+  processPlanFlipX = false
+  processPlanFlipY = false
+  try {
+    const raw = localStorage.getItem(PROCESS_PLAN_FLIP_STORAGE_KEY)
+    if (!raw) return
+    const o = JSON.parse(raw) as { flipX?: unknown; flipY?: unknown }
+    processPlanFlipX = Boolean(o.flipX)
+    processPlanFlipY = Boolean(o.flipY)
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveProcessPlanFlipToStorage(): void {
+  try {
+    localStorage.setItem(
+      PROCESS_PLAN_FLIP_STORAGE_KEY,
+      JSON.stringify({ flipX: processPlanFlipX, flipY: processPlanFlipY }),
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncProcessPlanFlipInputs(): void {
+  processFlipXInput.checked = processPlanFlipX
+  processFlipYInput.checked = processPlanFlipY
+}
+
+function commitProcessPlanFlipFromInputs(): void {
+  processPlanFlipX = processFlipXInput.checked
+  processPlanFlipY = processFlipYInput.checked
+  applyProcessPlanFlipCss()
+  saveProcessPlanFlipToStorage()
+  drawProcessOverlay()
+}
+
 function syncProcessOverlayShiftInputs(): void {
   processShiftXInput.value = String(processOverlayShiftX)
   processShiftYInput.value = String(processOverlayShiftY)
 }
 
+function snapShiftTo10Px(v: number): number {
+  return Math.round(v / 10) * 10
+}
+
 function commitProcessOverlayShiftFromInputs(): void {
   const x = Number(processShiftXInput.value)
   const y = Number(processShiftYInput.value)
-  processOverlayShiftX = Number.isFinite(x) ? x : 0
-  processOverlayShiftY = Number.isFinite(y) ? y : 0
+  processOverlayShiftX = Number.isFinite(x) ? snapShiftTo10Px(x) : 0
+  processOverlayShiftY = Number.isFinite(y) ? snapShiftTo10Px(y) : 0
+  syncProcessOverlayShiftInputs()
   saveProcessOverlayShiftToStorage()
   drawProcessOverlay()
+}
+
+function setSelectValueIfExists(sel: HTMLSelectElement, value: string): void {
+  if ([...sel.options].some((o) => o.value === value)) {
+    sel.value = value
+  }
+}
+
+function collectCurrentProcessBundleSettings(): ProcessBundleSettingsV1 {
+  return {
+    overlayShiftPx: {
+      x: processOverlayShiftX,
+      y: processOverlayShiftY,
+    },
+    flip: {
+      x: processPlanFlipX,
+      y: processPlanFlipY,
+    },
+    dotScale: processDotScale,
+    rssiOffsetDb: processRssiOffsetDb,
+    plotMetric: processPlotMetric,
+    show: {
+      pointLabels: processShowPlLabels.checked,
+      route: processShowPlRoute.checked,
+      colorTrail: processShowPlColoredTrail.checked,
+    },
+    fspl: {
+      enabled: processFsplEnable.checked,
+      measuredMhz: Number(processFsplRef.value),
+      estimateMhz: Number(processFsplTarget.value),
+    },
+  }
+}
+
+function applyProcessBundleSettings(settings: ProcessBundleSettingsV1): void {
+  if (settings.overlayShiftPx) {
+    processOverlayShiftX = snapShiftTo10Px(settings.overlayShiftPx.x)
+    processOverlayShiftY = snapShiftTo10Px(settings.overlayShiftPx.y)
+    syncProcessOverlayShiftInputs()
+    saveProcessOverlayShiftToStorage()
+  }
+  if (settings.flip) {
+    processPlanFlipX = settings.flip.x
+    processPlanFlipY = settings.flip.y
+    syncProcessPlanFlipInputs()
+    applyProcessPlanFlipCss()
+    saveProcessPlanFlipToStorage()
+  }
+  if (typeof settings.dotScale === 'number' && Number.isFinite(settings.dotScale)) {
+    processDotScale = clampPinDotScale(settings.dotScale)
+    syncProcessDotSizeControl()
+    saveProcessDotScaleToStorage()
+  }
+  if (typeof settings.rssiOffsetDb === 'number' && Number.isFinite(settings.rssiOffsetDb)) {
+    processRssiOffsetDb = settings.rssiOffsetDb
+    syncProcessRssiOffsetInput()
+    saveProcessRssiOffsetToStorage()
+  }
+  if (settings.plotMetric === 'path_loss' || settings.plotMetric === 'rssi') {
+    processPlotMetric = settings.plotMetric
+    processPlotMetricSelect.value = settings.plotMetric
+  }
+  if (settings.show) {
+    if (typeof settings.show.pointLabels === 'boolean') {
+      processShowPlLabels.checked = settings.show.pointLabels
+    }
+    if (typeof settings.show.route === 'boolean') {
+      processShowPlRoute.checked = settings.show.route
+    }
+    if (typeof settings.show.colorTrail === 'boolean') {
+      processShowPlColoredTrail.checked = settings.show.colorTrail
+    }
+  }
+  if (settings.fspl) {
+    if (typeof settings.fspl.enabled === 'boolean') {
+      processFsplEnable.checked = settings.fspl.enabled
+    }
+    if (typeof settings.fspl.measuredMhz === 'number' && Number.isFinite(settings.fspl.measuredMhz)) {
+      setSelectValueIfExists(processFsplRef, String(Math.round(settings.fspl.measuredMhz)))
+    }
+    if (typeof settings.fspl.estimateMhz === 'number' && Number.isFinite(settings.fspl.estimateMhz)) {
+      setSelectValueIfExists(processFsplTarget, String(Math.round(settings.fspl.estimateMhz)))
+    }
+    updateProcessFsplDeltaLabel()
+  }
 }
 
 function loadProcessDotScaleFromStorage(): void {
@@ -1998,6 +2236,40 @@ function saveProcessDotScaleToStorage(): void {
   } catch {
     /* ignore */
   }
+}
+
+function loadProcessRssiOffsetFromStorage(): void {
+  processRssiOffsetDb = 0
+  try {
+    const raw = localStorage.getItem(PROCESS_RSSI_OFFSET_STORAGE_KEY)
+    if (!raw) return
+    const o = JSON.parse(raw) as { offsetDb?: unknown }
+    const v = Number(o.offsetDb)
+    if (Number.isFinite(v)) processRssiOffsetDb = v
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveProcessRssiOffsetToStorage(): void {
+  try {
+    localStorage.setItem(PROCESS_RSSI_OFFSET_STORAGE_KEY, JSON.stringify({ offsetDb: processRssiOffsetDb }))
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncProcessRssiOffsetInput(): void {
+  processRssiOffsetInput.value = String(processRssiOffsetDb)
+}
+
+function commitProcessRssiOffsetFromInput(): void {
+  const v = Number(processRssiOffsetInput.value)
+  processRssiOffsetDb = Number.isFinite(v) ? v : 0
+  syncProcessRssiOffsetInput()
+  saveProcessRssiOffsetToStorage()
+  rebuildProcessMergedFromFspl()
+  drawProcessOverlay()
 }
 
 function updateProcessDotSizeLabel(): void {
@@ -2041,13 +2313,13 @@ function updateProcessTrailChrome(): void {
   const hasTrail = processTrailEditable.length > 0
   const hasMap = Boolean(processImg.naturalWidth)
   const hasAnyOverlay = processHasPlOverlay() || processHasRssiOverlay()
-  const canNudge = hasTrail && hasMap && !hasAnyOverlay
+  const canNudge = hasTrail && hasMap
   processNudgeTrail.disabled = !canNudge
   if (!canNudge) {
     processNudgeTrail.checked = false
     processTrailDragIndex = null
   }
-  processResetTrail.disabled = !hasTrail || !processTrailPixelsDirty() || hasAnyOverlay
+  processResetTrail.disabled = !hasTrail || !processTrailPixelsDirty()
   const saveDisabled = !hasTrail || !processTrailPixelsDirty()
   processSaveWalkEdited.disabled = saveDisabled
   processSaveWalkOriginal.disabled = saveDisabled
@@ -2068,12 +2340,7 @@ function updateProcessTrailChrome(): void {
 
 function onTrailPointerDown(e: PointerEvent): void {
   if (e.altKey && e.button === 0) return
-  if (
-    e.button !== 0 ||
-    !processNudgeTrail.checked ||
-    processHasPlOverlay() ||
-    processHasRssiOverlay()
-  ) {
+  if (e.button !== 0 || !processNudgeTrail.checked) {
     return
   }
   const i = findTrailHitIndex(e.clientX, e.clientY, processTrailDotRadius())
@@ -2083,6 +2350,7 @@ function onTrailPointerDown(e: PointerEvent): void {
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
   processRssiMergedPoints = []
+  processRssiMergedPointsRaw = []
   processRssiUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processTrailDragIndex = i
@@ -2218,6 +2486,9 @@ function onTrailPointerMove(e: PointerEvent): void {
   processMergedPoints = []
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
+  processRssiMergedPoints = []
+  processRssiMergedPointsRaw = []
+  processRssiUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   drawProcessOverlay()
   e.preventDefault()
@@ -2424,10 +2695,13 @@ function drawProcessOverlay(): void {
         : ''
     processLegend.hidden = false
     const fsplLegend =
-      !processMetricIsRssiView() &&
-      processMergedPointsRaw.length > 0 &&
+      (processMergedPointsRaw.length > 0 || processRssiMergedPointsRaw.length > 0) &&
       processFsplEnable.checked
         ? `<span>FSPL: estimated at <strong>${processFsplTarget.value}</strong> MHz (walk at <strong>${processFsplRef.value}</strong> MHz, free space)</span>`
+        : ''
+    const rssiOffsetLegend =
+      processRssiMergedPointsRaw.length > 0 && Math.abs(processRssiOffsetDb) > 1e-9
+        ? `<span>RSSI offset: <strong>${processRssiOffsetDb.toFixed(1)}</strong> dB (applied before FSPL)</span>`
         : ''
     const metricLabel = processMetricIsRssiView() ? 'RSSI' : 'PL'
     const metricUnit = processMetricIsRssiView() ? 'dBm' : 'dB'
@@ -2447,6 +2721,7 @@ function drawProcessOverlay(): void {
     ${scaleSpan}
     ${walkTypesLegend}
     ${unmatchedLegend}
+    ${rssiOffsetLegend}
     ${fsplLegend}
     ${dataRangeSpan}
   </div>`
@@ -2459,8 +2734,7 @@ function drawProcessOverlay(): void {
   if (hasTrail) {
     const colors = getOverlayColors()
     const trailPs = Math.min(1.25, Math.max(0.85, dotR / 5.5))
-    const nudgeOn =
-      processNudgeTrail.checked && !processHasPlOverlay() && !processHasRssiOverlay()
+    const nudgeOn = processNudgeTrail.checked
 
     if (processTrailEditable.length > 0) {
       ctx.strokeStyle = colors.trailLine
@@ -2591,11 +2865,14 @@ function safeBundleDownloadFilename(raw: string): string {
 async function saveProcessBundle(downloadFilename: string): Promise<boolean> {
   if (!processImg.naturalWidth || !processTrailEditable.length) return false
   let plText = processPathLossCsvText.trim()
+  let rssiText = processRssiCsvText.trim()
   const plFile = processFilePl.files?.[0]
+  const rssiFile = processFileRssi.files?.[0]
   if (!plText && plFile) plText = await readFileAsText(plFile)
-  if (!plText) {
+  if (!rssiText && rssiFile) rssiText = await readFileAsText(rssiFile)
+  if (!plText && !rssiText) {
     processStatus.textContent =
-      'Choose a path loss CSV (or load a bundle that includes one) before saving a bundle.'
+      'Choose a path loss CSV and/or RSSI CSV (or load a bundle that includes one) before saving a bundle.'
     return false
   }
   const walkText = serializeWalkplotterEditable(
@@ -2621,6 +2898,8 @@ async function saveProcessBundle(downloadFilename: string): Promise<boolean> {
     },
     walkplotterCsv: walkText.replace(/^\uFEFF/, ''),
     pathLossCsv: plText.replace(/^\uFEFF/, ''),
+    ...(rssiText ? { rssiCsv: rssiText.replace(/^\uFEFF/, '') } : {}),
+    settings: collectCurrentProcessBundleSettings(),
   }
   const json = JSON.stringify(bundle)
   downloadJsonFile(downloadFilename, json)
@@ -2637,14 +2916,17 @@ async function applyProcessBundle(bundle: ProcessBundleV1): Promise<void> {
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
   processPathLossCsvText = bundle.pathLossCsv
-  processRssiCsvText = ''
+  processRssiCsvText = bundle.rssiCsv ?? ''
   processRssiMergedPoints = []
+  processRssiMergedPointsRaw = []
   processRssiUnmatchedTrailPoints = []
-  processPlotMetric = 'path_loss'
+  processPlotMetric = 'rssi'
+  processRecentMapNameOverride = null
   processFilePlan.value = ''
   processFileWalk.value = ''
   processFilePl.value = ''
   processFileRssi.value = ''
+  pendingBundleSettings = bundle.settings ?? null
   processNudgeTrail.checked = false
   processTrailDragIndex = null
   processFsplEnable.checked = false
@@ -2669,10 +2951,12 @@ async function applyProcessBundle(bundle: ProcessBundleV1): Promise<void> {
   processBundleSummaryOverride = {
     plan: bundle.floorPlan.fileName,
     walk: '(from bundle)',
-    pl: '(from bundle)',
+    pl: bundle.pathLossCsv.trim().length > 0 ? '(from bundle)' : '—',
+    rssi: bundle.rssiCsv?.trim().length ? '(from bundle)' : '—',
   }
   updateProcessFileSummary()
-  processStatus.textContent = `Loaded process bundle (saved ${bundle.savedAt.slice(0, 19)}). Tap Plot overlay to redraw.`
+  const settingsMsg = bundle.settings ? ' View/settings restored.' : ''
+  processStatus.textContent = `Loaded process bundle (saved ${bundle.savedAt.slice(0, 19)}). Tap Plot overlay to redraw.${settingsMsg}`
   drawProcessOverlay()
 }
 
@@ -2697,7 +2981,7 @@ function runProcessPlot(): void {
   const wantPl = Boolean(plFile || plFromMemory)
   const wantRssi = Boolean(rssiFile || rssiFromMemory)
   if (!processImg.naturalWidth) {
-    processStatus.textContent = 'Load a floor plan image first.'
+    processStatus.textContent = 'Load a map image first.'
     return
   }
   if (!processTrailEditable.length) {
@@ -2706,7 +2990,7 @@ function runProcessPlot(): void {
   }
   if (!wantPl && !wantRssi) {
     processStatus.textContent =
-      'Choose a path loss CSV and/or an RSSI CSV (`time` + `rssi`), or load a process bundle with path loss.'
+      'Choose a path loss CSV and/or an RSSI CSV (`time` + `rssi`), or load a process bundle with path loss and/or RSSI.'
     return
   }
   void (async () => {
@@ -2731,6 +3015,7 @@ function runProcessPlot(): void {
         processMergedPointsRaw = []
         processUnmatchedTrailPoints = []
         processRssiMergedPoints = []
+        processRssiMergedPointsRaw = []
         processRssiUnmatchedTrailPoints = []
         updateProcessFsplChrome()
         drawProcessOverlay()
@@ -2744,6 +3029,7 @@ function runProcessPlot(): void {
       }
       if (!wantRssi) {
         processRssiMergedPoints = []
+        processRssiMergedPointsRaw = []
         processRssiUnmatchedTrailPoints = []
       }
 
@@ -2793,13 +3079,12 @@ function runProcessPlot(): void {
           }
         }
       }
-      rebuildProcessMergedFromFspl()
-
       if (wantRssi) {
         const rssiText = rssiFile ? await readFileAsText(rssiFile) : processRssiCsvText
         const rssiRows = parseRssiCsv(rssiText)
         if (!rssiRows.length) {
           processRssiMergedPoints = []
+          processRssiMergedPointsRaw = []
           processRssiUnmatchedTrailPoints = []
           parts.push('RSSI: no rows parsed (expect `time` and `rssi` columns, or two columns time + dBm).')
         } else {
@@ -2810,7 +3095,7 @@ function runProcessPlot(): void {
             DEFAULT_MAX_MATCH_MS,
             mergeOpts
           )
-          processRssiMergedPoints = rm
+          processRssiMergedPointsRaw = rm.map((p) => ({ ...p }))
           processRssiUnmatchedTrailPoints = ru
           rssiMergedN = rm.length
           rssiUnmatchedN = ru.length
@@ -2830,6 +3115,7 @@ function runProcessPlot(): void {
         }
       }
 
+      rebuildProcessMergedFromFspl()
       updateProcessFsplChrome()
       syncProcessPlotMetricAfterPlot(plMergedN, plUnmatchedN, rssiMergedN, rssiUnmatchedN)
       const anyOverlay = processHasPlOverlay() || processHasRssiOverlay()
@@ -2843,6 +3129,7 @@ function runProcessPlot(): void {
       processMergedPointsRaw = []
       processUnmatchedTrailPoints = []
       processRssiMergedPoints = []
+      processRssiMergedPointsRaw = []
       processRssiUnmatchedTrailPoints = []
       updateProcessFsplChrome()
       drawProcessOverlay()
@@ -2987,8 +3274,8 @@ function updateChrome(): void {
 
   if (!hasMap) {
     hintMain.textContent =
-      'Load a floor plan. Trail mode records walk pins with timestamps; POI mode adds red labeled points of interest (not on the trail).'
-    hintMap.textContent = 'Open the Controls tab to load a floor plan.'
+      'Load a map. Trail mode records walk pins with timestamps; POI mode adds red labeled points of interest (not on the trail).'
+    hintMap.textContent = 'Open the Controls tab to load a map.'
   } else if (placementMode === 'poi') {
     hintMain.textContent =
       'POI mode: tap to place a red marker, then enter a label. POI markers are not on the trail and have no timestamps. Switch to Trail to walk.'
@@ -3028,11 +3315,11 @@ function openSaveDialog(): void {
 
   if (hasPoints && hasPoi) {
     saveIncludeJpgText.textContent =
-      'Also save a map snapshot (floor plan + trail + POI markers) as JPG'
+      'Also save a map snapshot (map + trail + POI markers) as JPG'
   } else if (hasPoints) {
-    saveIncludeJpgText.textContent = 'Also save a map snapshot (floor plan + trail) as JPG'
+    saveIncludeJpgText.textContent = 'Also save a map snapshot (map + trail) as JPG'
   } else {
-    saveIncludeJpgText.textContent = 'Also save a map snapshot (floor plan + POI markers) as JPG'
+    saveIncludeJpgText.textContent = 'Also save a map snapshot (map + POI markers) as JPG'
   }
 
   saveFilenameInput.value = downloadFilename()
@@ -3160,11 +3447,14 @@ function formatRecentPlanWhen(ms: number): string {
 async function refreshRecentFloorPlansUi(): Promise<void> {
   const meta = await listRecentFloorPlansMeta()
   recentFloorPlansList.replaceChildren()
+  processRecentFloorPlansList.replaceChildren()
   if (meta.length === 0) {
     recentFloorPlansWrap.hidden = true
+    processRecentFloorPlansWrap.hidden = true
     return
   }
   recentFloorPlansWrap.hidden = false
+  processRecentFloorPlansWrap.hidden = false
   for (const m of meta) {
     const li = document.createElement('li')
     li.className = 'recent-floor-plans-item'
@@ -3178,7 +3468,7 @@ async function refreshRecentFloorPlansUi(): Promise<void> {
     const rm = document.createElement('button')
     rm.type = 'button'
     rm.className = 'btn recent-floor-plans-remove'
-    rm.setAttribute('aria-label', `Remove ${m.fileName} from recent plans`)
+    rm.setAttribute('aria-label', `Remove ${m.fileName} from recent maps`)
     rm.title = 'Remove from list'
     rm.textContent = '×'
     rm.addEventListener('click', (e) => {
@@ -3188,6 +3478,28 @@ async function refreshRecentFloorPlansUi(): Promise<void> {
     li.appendChild(pick)
     li.appendChild(rm)
     recentFloorPlansList.appendChild(li)
+
+    const liProcess = document.createElement('li')
+    liProcess.className = 'recent-floor-plans-item'
+    const pickProcess = document.createElement('button')
+    pickProcess.type = 'button'
+    pickProcess.className = 'btn recent-floor-plans-pick'
+    pickProcess.textContent = shortName
+    pickProcess.title = `${m.fileName}\nOpened: ${formatRecentPlanWhen(m.savedAt)}`
+    pickProcess.addEventListener('click', () => void pickRecentFloorPlanForProcess(m.key))
+    const rmProcess = document.createElement('button')
+    rmProcess.type = 'button'
+    rmProcess.className = 'btn recent-floor-plans-remove'
+    rmProcess.setAttribute('aria-label', `Remove ${m.fileName} from recent maps`)
+    rmProcess.title = 'Remove from list'
+    rmProcess.textContent = '×'
+    rmProcess.addEventListener('click', (e) => {
+      e.stopPropagation()
+      void removeRecentFloorPlan(m.key).then(() => refreshRecentFloorPlansUi())
+    })
+    liProcess.appendChild(pickProcess)
+    liProcess.appendChild(rmProcess)
+    processRecentFloorPlansList.appendChild(liProcess)
   }
 }
 
@@ -3201,6 +3513,36 @@ async function pickRecentFloorPlan(key: string): Promise<void> {
   applyMapFloorPlanBlob(got.blob, got.fileName)
   await refreshRecentFloorPlansUi()
   updateChrome()
+}
+
+function applyProcessMapBlob(blob: Blob, fileName: string): void {
+  if (!blob.type.startsWith('image/')) return
+  processBundleSummaryOverride = null
+  if (processPlanObjectUrl) {
+    URL.revokeObjectURL(processPlanObjectUrl)
+    processPlanObjectUrl = null
+  }
+  clearProcessTrailState()
+  processRecentMapNameOverride = fileName || 'unknown'
+  processFilePlan.value = ''
+  processFileWalk.value = ''
+  processFilePl.value = ''
+  processFileRssi.value = ''
+  processPlanObjectUrl = URL.createObjectURL(blob)
+  processImg.src = processPlanObjectUrl
+  processStatus.textContent = 'Loaded recent map. Choose Walkplotter CSV to continue.'
+  updateProcessFileSummary()
+}
+
+async function pickRecentFloorPlanForProcess(key: string): Promise<void> {
+  const got = await loadRecentFloorPlanBlob(key)
+  if (!got) {
+    await refreshRecentFloorPlansUi()
+    return
+  }
+  await touchRecentFloorPlan(key)
+  applyProcessMapBlob(got.blob, got.fileName)
+  await refreshRecentFloorPlansUi()
 }
 
 fileInput.addEventListener('change', () => {
@@ -3230,6 +3572,7 @@ tabProcess.addEventListener('click', () => setTab('process'))
 
 processFilePlan.addEventListener('change', () => {
   processBundleSummaryOverride = null
+  processRecentMapNameOverride = null
   const f = processFilePlan.files?.[0]
   if (processPlanObjectUrl) {
     URL.revokeObjectURL(processPlanObjectUrl)
@@ -3248,7 +3591,7 @@ processFilePlan.addEventListener('change', () => {
     processDotSizeRange.disabled = true
     processMouseHint.hidden = true
     resetProcessView()
-    processStatus.textContent = 'Load floor plan and Walkplotter CSV to begin.'
+    processStatus.textContent = 'Load map and Walkplotter CSV to begin.'
     drawProcessOverlay()
     updateProcessFileSummary()
     return
@@ -3267,6 +3610,7 @@ processFileWalk.addEventListener('change', () => {
     processMergedPointsRaw = []
     processUnmatchedTrailPoints = []
     processRssiMergedPoints = []
+    processRssiMergedPointsRaw = []
     processRssiUnmatchedTrailPoints = []
     processRssiCsvText = ''
     processFileRssi.value = ''
@@ -3280,7 +3624,7 @@ processFileWalk.addEventListener('change', () => {
       processTrailEditable = []
       processTrailOriginal = []
       processWalkTestDate = null
-      processStatus.textContent = 'Load floor plan and Walkplotter CSV to begin.'
+      processStatus.textContent = 'Load map and Walkplotter CSV to begin.'
       drawProcessOverlay()
       return
     }
@@ -3307,6 +3651,7 @@ processFileWalk.addEventListener('change', () => {
       processMergedPointsRaw = []
       processUnmatchedTrailPoints = []
       processRssiMergedPoints = []
+      processRssiMergedPointsRaw = []
       processRssiUnmatchedTrailPoints = []
       processRssiCsvText = ''
       processFileRssi.value = ''
@@ -3404,6 +3749,10 @@ processImg.addEventListener('load', () => {
   processDotSizeRange.disabled = false
   processMouseHint.hidden = false
   resetProcessView()
+  if (pendingBundleSettings) {
+    applyProcessBundleSettings(pendingBundleSettings)
+    pendingBundleSettings = null
+  }
   syncProcessOverlayCanvas()
   updateProcessBundleButtons()
   drawProcessOverlay()
@@ -3415,6 +3764,7 @@ processBtnClearPlot.addEventListener('click', () => {
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
   processRssiMergedPoints = []
+  processRssiMergedPointsRaw = []
   processRssiUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processFsplDelta.textContent = ''
@@ -3452,6 +3802,7 @@ processResetTrail.addEventListener('click', () => {
   processMergedPointsRaw = []
   processUnmatchedTrailPoints = []
   processRssiMergedPoints = []
+  processRssiMergedPointsRaw = []
   processRssiUnmatchedTrailPoints = []
   updateProcessFsplChrome()
   processFsplDelta.textContent = ''
@@ -3465,8 +3816,13 @@ processCanvas.addEventListener('pointerup', onTrailPointerUp)
 processCanvas.addEventListener('pointercancel', onTrailPointerUp)
 loadProcessOverlayShiftFromStorage()
 syncProcessOverlayShiftInputs()
+loadProcessPlanFlipFromStorage()
+syncProcessPlanFlipInputs()
+applyProcessPlanFlipCss()
 loadProcessDotScaleFromStorage()
 syncProcessDotSizeControl()
+loadProcessRssiOffsetFromStorage()
+syncProcessRssiOffsetInput()
 processShiftXInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftYInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftReset.addEventListener('click', () => {
@@ -3474,6 +3830,25 @@ processShiftReset.addEventListener('click', () => {
   processOverlayShiftY = 0
   syncProcessOverlayShiftInputs()
   saveProcessOverlayShiftToStorage()
+  drawProcessOverlay()
+})
+processFlipXInput.addEventListener('change', () => commitProcessPlanFlipFromInputs())
+processFlipYInput.addEventListener('change', () => commitProcessPlanFlipFromInputs())
+processFlipReset.addEventListener('click', () => {
+  processPlanFlipX = false
+  processPlanFlipY = false
+  syncProcessPlanFlipInputs()
+  applyProcessPlanFlipCss()
+  saveProcessPlanFlipToStorage()
+  drawProcessOverlay()
+})
+processRssiOffsetInput.addEventListener('input', () => commitProcessRssiOffsetFromInput())
+processRssiOffsetInput.addEventListener('change', () => commitProcessRssiOffsetFromInput())
+processRssiOffsetReset.addEventListener('click', () => {
+  processRssiOffsetDb = 0
+  syncProcessRssiOffsetInput()
+  saveProcessRssiOffsetToStorage()
+  rebuildProcessMergedFromFspl()
   drawProcessOverlay()
 })
 processDotSizeRange.addEventListener('input', () => {
@@ -3888,7 +4263,7 @@ btnUndo.addEventListener('click', () => {
 
 btnClear.addEventListener('click', () => {
   if (!trail.points.length) return
-  if (!confirm('Clear all pins on this floor plan?')) return
+  if (!confirm('Clear all pins on this map?')) return
   trail.clear()
   redraw()
   updateChrome()

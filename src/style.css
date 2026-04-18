@@ -739,6 +739,14 @@ body {
   gap: 10px 12px;
 }
 
+.process-toolbar--rssi-adjust {
+  margin-top: -2px;
+  padding-top: 4px;
+  align-items: center;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+}
+
 .process-fspl-toggle {
   align-self: center;
 }
@@ -1190,6 +1198,20 @@ label.process-file-pick {
   object-fit: contain;
   user-select: none;
   pointer-events: none;
+}
+
+.process-stage img.process-plan--flip-x {
+  transform: scaleX(-1);
+  transform-origin: 50% 50%;
+}
+
+.process-stage img.process-plan--flip-y {
+  transform: scaleY(-1);
+  transform-origin: 50% 50%;
+}
+
+.process-stage img.process-plan--flip-x.process-plan--flip-y {
+  transform: scale(-1, -1);
 }
 
 .process-stage canvas {
