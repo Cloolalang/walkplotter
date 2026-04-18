@@ -113,6 +113,9 @@ let processPlanFlipY = false
 const PROCESS_DOT_SCALE_STORAGE_KEY = 'walkplotter-process-dot-scale-v1'
 /** Scales Process overlay trail/RF dot radius (same range as Map pin size). */
 let processDotScale = 1
+const PROCESS_PALETTE_SAT_STORAGE_KEY = 'walkplotter-process-palette-sat-v1'
+/** Saturation multiplier for Process metric palette (1 = original colors). */
+let processPaletteSaturation = 1
 const PROCESS_RSSI_OFFSET_STORAGE_KEY = 'walkplotter-process-rssi-offset-v1'
 /** Applies a global dB offset to all RSSI samples before FSPL scaling (what-if calibration). */
 let processRssiOffsetDb = 0
@@ -919,6 +922,39 @@ app.innerHTML = `
         <span class="process-file-name" id="process-filename-rssi">—</span>
       </div>
     </div>
+    <div class="map-zoom-bar process-zoom-bar" id="process-zoom-bar" hidden>
+      <span>View</span>
+      <button type="button" class="btn" id="process-btn-zoom-out" title="Zoom out">−</button>
+      <span class="zoom-pct" id="process-zoom-pct">100%</span>
+      <button type="button" class="btn" id="process-btn-zoom-in" title="Zoom in">+</button>
+      <button type="button" class="btn" id="process-btn-zoom-reset" title="Reset pan and zoom">Reset view</button>
+    </div>
+    <div class="pin-size-bar process-dot-size-bar" id="process-dot-size-bar" hidden>
+      <label class="pin-size-label" for="process-dot-size">Dot size</label>
+      <input
+        type="range"
+        id="process-dot-size"
+        min="1"
+        max="250"
+        step="5"
+        value="100"
+        disabled
+        aria-label="Process overlay dot size"
+      />
+      <span class="pin-size-pct" id="process-dot-size-pct">100%</span>
+      <label class="pin-size-label process-palette-sat-label" for="process-palette-sat">Palette saturation</label>
+      <input
+        type="range"
+        id="process-palette-sat"
+        min="0"
+        max="200"
+        step="5"
+        value="100"
+        disabled
+        aria-label="Process palette saturation percent"
+      />
+      <span class="pin-size-pct" id="process-palette-sat-pct">100%</span>
+    </div>
     <p class="hint process-status" id="process-status">Load map and Walkplotter CSV to begin.</p>
     <div class="process-legend" id="process-legend" hidden></div>
     <div class="process-histogram-wrap" id="process-histogram-wrap" hidden>
@@ -959,27 +995,6 @@ app.innerHTML = `
           </table>
         </div>
       </div>
-    </div>
-    <div class="map-zoom-bar process-zoom-bar" id="process-zoom-bar" hidden>
-      <span>View</span>
-      <button type="button" class="btn" id="process-btn-zoom-out" title="Zoom out">−</button>
-      <span class="zoom-pct" id="process-zoom-pct">100%</span>
-      <button type="button" class="btn" id="process-btn-zoom-in" title="Zoom in">+</button>
-      <button type="button" class="btn" id="process-btn-zoom-reset" title="Reset pan and zoom">Reset view</button>
-    </div>
-    <div class="pin-size-bar process-dot-size-bar" id="process-dot-size-bar" hidden>
-      <label class="pin-size-label" for="process-dot-size">Dot size</label>
-      <input
-        type="range"
-        id="process-dot-size"
-        min="1"
-        max="250"
-        step="5"
-        value="100"
-        disabled
-        aria-label="Process overlay dot size"
-      />
-      <span class="pin-size-pct" id="process-dot-size-pct">100%</span>
     </div>
     <p class="hint process-mouse-hint" id="process-mouse-hint" hidden>
       Mouse: wheel to zoom · drag empty area to pan · while nudging: <strong>left-drag</strong> on empty space, or <strong>middle-drag</strong> / <strong>Alt+drag</strong> anywhere, to pan the view.
@@ -1192,6 +1207,8 @@ const processZoomBar = document.querySelector<HTMLDivElement>('#process-zoom-bar
 const processDotSizeBar = document.querySelector<HTMLDivElement>('#process-dot-size-bar')!
 const processDotSizeRange = document.querySelector<HTMLInputElement>('#process-dot-size')!
 const processDotSizePctEl = document.querySelector<HTMLSpanElement>('#process-dot-size-pct')!
+const processPaletteSatRange = document.querySelector<HTMLInputElement>('#process-palette-sat')!
+const processPaletteSatPctEl = document.querySelector<HTMLSpanElement>('#process-palette-sat-pct')!
 const processZoomPctEl = document.querySelector<HTMLSpanElement>('#process-zoom-pct')!
 const processBtnZoomIn = document.querySelector<HTMLButtonElement>('#process-btn-zoom-in')!
 const processBtnZoomOut = document.querySelector<HTMLButtonElement>('#process-btn-zoom-out')!
@@ -1581,7 +1598,7 @@ const PL_COLOR_STOPS_DEFAULT: readonly { db: number; rgb: PlRgb }[] = [
   { db: -68, rgb: [64, 255, 26] },
   { db: -62, rgb: [0, 250, 142] },
   { db: -54, rgb: [4, 230, 246] },
-  { db: -46, rgb: [23, 131, 232] },
+  { db: -46, rgb: [42, 158, 246] },
   { db: -38, rgb: [148, 196, 255] },
   { db: -30, rgb: [255, 255, 255] },
 ]
@@ -1651,27 +1668,43 @@ function lerpChannel(a: number, b: number, t: number): number {
   return Math.round(a + (b - a) * t)
 }
 
+function applyPaletteSaturation(r: number, g: number, b: number): [number, number, number] {
+  const s = Math.max(0, Math.min(2, processPaletteSaturation))
+  const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  const sat = (c: number) => Math.max(0, Math.min(255, Math.round(gray + (c - gray) * s)))
+  return [sat(r), sat(g), sat(b)]
+}
+
+function rgbStringFromPalette(r: number, g: number, b: number): string {
+  const c = applyPaletteSaturation(r, g, b)
+  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+}
+
 function pathLossToColor(pl: number): string {
   const x = Math.max(PROCESS_PL_BAD, Math.min(PROCESS_PL_GOOD, pl))
   const stops = plColorStops
   if (x <= stops[0]!.db) {
     const c = stops[0]!.rgb
-    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+    return rgbStringFromPalette(c[0], c[1], c[2])
   }
   if (x >= stops[stops.length - 1]!.db) {
     const c = stops[stops.length - 1]!.rgb
-    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+    return rgbStringFromPalette(c[0], c[1], c[2])
   }
   for (let i = 0; i < stops.length - 1; i++) {
     const lo = stops[i]!
     const hi = stops[i + 1]!
     if (x >= lo.db && x <= hi.db) {
       const t = (x - lo.db) / (hi.db - lo.db)
-      return `rgb(${lerpChannel(lo.rgb[0], hi.rgb[0], t)}, ${lerpChannel(lo.rgb[1], hi.rgb[1], t)}, ${lerpChannel(lo.rgb[2], hi.rgb[2], t)})`
+      return rgbStringFromPalette(
+        lerpChannel(lo.rgb[0], hi.rgb[0], t),
+        lerpChannel(lo.rgb[1], hi.rgb[1], t),
+        lerpChannel(lo.rgb[2], hi.rgb[2], t)
+      )
     }
   }
   const c = stops[stops.length - 1]!.rgb
-  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+  return rgbStringFromPalette(c[0], c[1], c[2])
 }
 
 function pathLossScaleGradientCss(): string {
@@ -1695,7 +1728,7 @@ const RSSI_COLOR_STOPS: readonly { db: number; rgb: readonly [number, number, nu
   { db: -80, rgb: [255, 130, 36] },
   { db: -70, rgb: [255, 215, 52] },
   { db: -60, rgb: [108, 198, 68] },
-  { db: -50, rgb: [30, 102, 172] },
+  { db: -50, rgb: [52, 136, 214] },
   { db: -40, rgb: [64, 138, 230] },
   { db: -30, rgb: [168, 208, 255] },
   { db: -25, rgb: [255, 255, 255] },
@@ -1706,22 +1739,26 @@ function rssiToColor(rssi: number): string {
   const stops = RSSI_COLOR_STOPS
   if (x <= stops[0]!.db) {
     const c = stops[0]!.rgb
-    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+    return rgbStringFromPalette(c[0], c[1], c[2])
   }
   if (x >= stops[stops.length - 1]!.db) {
     const c = stops[stops.length - 1]!.rgb
-    return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+    return rgbStringFromPalette(c[0], c[1], c[2])
   }
   for (let i = 0; i < stops.length - 1; i++) {
     const lo = stops[i]!
     const hi = stops[i + 1]!
     if (x >= lo.db && x <= hi.db) {
       const t = (x - lo.db) / (hi.db - lo.db)
-      return `rgb(${lerpChannel(lo.rgb[0], hi.rgb[0], t)}, ${lerpChannel(lo.rgb[1], hi.rgb[1], t)}, ${lerpChannel(lo.rgb[2], hi.rgb[2], t)})`
+      return rgbStringFromPalette(
+        lerpChannel(lo.rgb[0], hi.rgb[0], t),
+        lerpChannel(lo.rgb[1], hi.rgb[1], t),
+        lerpChannel(lo.rgb[2], hi.rgb[2], t)
+      )
     }
   }
   const c = stops[stops.length - 1]!.rgb
-  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+  return rgbStringFromPalette(c[0], c[1], c[2])
 }
 
 function rssiScaleGradientCss(): string {
@@ -2494,6 +2531,30 @@ function saveProcessDotScaleToStorage(): void {
   }
 }
 
+function loadProcessPaletteSaturationFromStorage(): void {
+  processPaletteSaturation = 1
+  try {
+    const raw = localStorage.getItem(PROCESS_PALETTE_SAT_STORAGE_KEY)
+    if (!raw) return
+    const o = JSON.parse(raw) as { saturation?: unknown }
+    const s = Number(o.saturation)
+    if (Number.isFinite(s)) processPaletteSaturation = Math.max(0, Math.min(2, s))
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveProcessPaletteSaturationToStorage(): void {
+  try {
+    localStorage.setItem(
+      PROCESS_PALETTE_SAT_STORAGE_KEY,
+      JSON.stringify({ saturation: processPaletteSaturation })
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
 function loadProcessRssiOffsetFromStorage(): void {
   processRssiOffsetDb = 0
   try {
@@ -2606,10 +2667,12 @@ function syncProcessHeatmapControls(): void {
 
 function updateProcessDotSizeLabel(): void {
   processDotSizePctEl.textContent = `${Math.round(processDotScale * 100)}%`
+  processPaletteSatPctEl.textContent = `${Math.round(processPaletteSaturation * 100)}%`
 }
 
 function syncProcessDotSizeControl(): void {
   processDotSizeRange.value = String(Math.round(processDotScale * 100))
+  processPaletteSatRange.value = String(Math.round(processPaletteSaturation * 100))
   updateProcessDotSizeLabel()
 }
 
@@ -4573,6 +4636,7 @@ processFilePlan.addEventListener('change', () => {
     processZoomBar.hidden = true
     processDotSizeBar.hidden = true
     processDotSizeRange.disabled = true
+    processPaletteSatRange.disabled = true
     processMouseHint.hidden = true
     resetProcessView()
     processStatus.textContent = 'Load map and Walkplotter CSV to begin.'
@@ -4767,6 +4831,7 @@ processImg.addEventListener('load', () => {
   processZoomBar.hidden = false
   processDotSizeBar.hidden = false
   processDotSizeRange.disabled = false
+  processPaletteSatRange.disabled = false
   processMouseHint.hidden = false
   resetProcessView()
   if (pendingBundleSettings) {
@@ -4845,6 +4910,7 @@ loadProcessPlanFlipFromStorage()
 syncProcessPlanFlipInputs()
 applyProcessPlanFlipCss()
 loadProcessDotScaleFromStorage()
+loadProcessPaletteSaturationFromStorage()
 syncProcessDotSizeControl()
 loadProcessRssiOffsetFromStorage()
 syncProcessRssiOffsetInput()
@@ -4941,6 +5007,12 @@ processDotSizeRange.addEventListener('input', () => {
   processDotScale = clampProcessDotScale(Number(processDotSizeRange.value) / 100)
   updateProcessDotSizeLabel()
   saveProcessDotScaleToStorage()
+  drawProcessOverlay()
+})
+processPaletteSatRange.addEventListener('input', () => {
+  processPaletteSaturation = Math.max(0, Math.min(2, Number(processPaletteSatRange.value) / 100))
+  updateProcessDotSizeLabel()
+  saveProcessPaletteSaturationToStorage()
   drawProcessOverlay()
 })
 updateProcessFileSummary()

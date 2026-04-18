@@ -555,6 +555,10 @@ body {
   margin-top: 6px;
 }
 
+.process-palette-sat-label {
+  margin-left: 8px;
+}
+
 .pin-size-pct {
   font-variant-numeric: tabular-nums;
   color: var(--accent);
