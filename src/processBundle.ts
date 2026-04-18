@@ -10,6 +10,14 @@ export type ProcessBundleSettingsV1 = {
   flip?: { x: boolean; y: boolean }
   dotScale?: number
   rssiOffsetDb?: number
+  heatmap?: {
+    enabled?: boolean
+    useBoundary?: boolean
+    boundaryClosed?: boolean
+    boundaryPoints?: { x: number; y: number }[]
+    radiusPx?: number
+    opacity?: number
+  }
   plotMetric?: 'path_loss' | 'rssi'
   show?: {
     pointLabels?: boolean
@@ -106,6 +114,45 @@ export function parseProcessBundleJson(text: string): ProcessBundleV1 | null {
       const rssiOffsetDb = asFiniteNumberOrUndefined(s.rssiOffsetDb)
       if (rssiOffsetDb == null) return null
       out.rssiOffsetDb = rssiOffsetDb
+    }
+    if (s.heatmap != null) {
+      if (!isRecord(s.heatmap)) return null
+      const heatmap: NonNullable<ProcessBundleSettingsV1['heatmap']> = {}
+      if (s.heatmap.enabled != null) {
+        if (typeof s.heatmap.enabled !== 'boolean') return null
+        heatmap.enabled = s.heatmap.enabled
+      }
+      if (s.heatmap.useBoundary != null) {
+        if (typeof s.heatmap.useBoundary !== 'boolean') return null
+        heatmap.useBoundary = s.heatmap.useBoundary
+      }
+      if (s.heatmap.boundaryClosed != null) {
+        if (typeof s.heatmap.boundaryClosed !== 'boolean') return null
+        heatmap.boundaryClosed = s.heatmap.boundaryClosed
+      }
+      if (s.heatmap.boundaryPoints != null) {
+        if (!Array.isArray(s.heatmap.boundaryPoints)) return null
+        const pts: { x: number; y: number }[] = []
+        for (const p of s.heatmap.boundaryPoints) {
+          if (!isRecord(p)) return null
+          const x = asFiniteNumberOrUndefined(p.x)
+          const y = asFiniteNumberOrUndefined(p.y)
+          if (x == null || y == null) return null
+          pts.push({ x, y })
+        }
+        heatmap.boundaryPoints = pts
+      }
+      if (s.heatmap.radiusPx != null) {
+        const radiusPx = asFiniteNumberOrUndefined(s.heatmap.radiusPx)
+        if (radiusPx == null) return null
+        heatmap.radiusPx = radiusPx
+      }
+      if (s.heatmap.opacity != null) {
+        const opacity = asFiniteNumberOrUndefined(s.heatmap.opacity)
+        if (opacity == null) return null
+        heatmap.opacity = opacity
+      }
+      out.heatmap = heatmap
     }
 
     if (s.plotMetric != null) {

@@ -747,6 +747,26 @@ body {
   flex-wrap: wrap;
 }
 
+.process-toolbar--heatmap {
+  margin-top: -2px;
+  padding-top: 4px;
+  align-items: center;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+}
+
+.process-heatmap-range {
+  width: 8.5rem;
+  accent-color: var(--accent);
+}
+
+.process-heatmap-value {
+  min-width: 3.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .process-fspl-toggle {
   align-self: center;
 }

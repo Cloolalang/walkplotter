@@ -108,6 +108,17 @@ let processDotScale = 1
 const PROCESS_RSSI_OFFSET_STORAGE_KEY = 'walkplotter-process-rssi-offset-v1'
 /** Applies a global dB offset to all RSSI samples before FSPL scaling (what-if calibration). */
 let processRssiOffsetDb = 0
+const PROCESS_HEATMAP_STORAGE_KEY = 'walkplotter-process-heatmap-v1'
+/** Distance-weighted heatmap controls for Process metric overlay. */
+let processShowHeatmap = false
+let processHeatmapRadiusPx = 90
+let processHeatmapOpacity = 0.55
+let processHeatmapWorkCanvas: HTMLCanvasElement | null = null
+let processHeatmapUseBoundary = false
+let processHeatmapDrawBoundary = false
+let processHeatmapBoundaryClosed = false
+let processHeatmapBoundaryPoints: { x: number; y: number }[] = []
+let processHeatmapBoundaryDragIndex: number | null = null
 
 /** Pan (px) and scale for the floor plan; CSS transform on #stage-inner. */
 let mapPanX = 0
@@ -120,6 +131,7 @@ let processZoom = 1
 const MAP_ZOOM_MIN = 0.35
 const MAP_ZOOM_MAX = 8
 const PIN_DOT_SCALE_MIN = 0.25
+const PROCESS_DOT_SCALE_MIN = 0.01
 const PIN_DOT_SCALE_MAX = 2.5
 /** Multiplier for on-screen pins, trail stroke, POI markers (1 = default). */
 let pinDotScale = 1
@@ -771,6 +783,54 @@ app.innerHTML = `
         Reset RSSI offset
       </button>
     </div>
+    <div class="process-toolbar process-toolbar--heatmap" id="process-heatmap-wrap" hidden>
+      <label class="toolbar-toggle process-toolbar-toggle" title="Distance-weighted heatmap based on nearby plotted sample values">
+        <input type="checkbox" id="process-show-heatmap" />
+        Heatmap
+      </label>
+      <label class="toolbar-toggle process-toolbar-toggle" title="Clip heatmap so it only appears inside the boundary polygon">
+        <input type="checkbox" id="process-heatmap-use-boundary" />
+        Use boundary
+      </label>
+      <label class="toolbar-toggle process-toolbar-toggle" title="Click map to add boundary vertices; drag vertices to edit">
+        <input type="checkbox" id="process-heatmap-draw-boundary" />
+        Draw boundary
+      </label>
+      <button type="button" class="btn" id="process-heatmap-close-boundary" title="Close polygon from last point to first">
+        Close boundary
+      </button>
+      <button type="button" class="btn" id="process-heatmap-clear-boundary" title="Remove all boundary points">
+        Clear boundary
+      </button>
+      <label class="process-shift-field" for="process-heatmap-radius"
+        ><span class="process-shift-label">Radius</span>
+        <input
+          type="range"
+          id="process-heatmap-radius"
+          class="process-heatmap-range"
+          min="20"
+          max="1000"
+          step="5"
+          value="90"
+          aria-label="Heatmap influence radius in pixels"
+        />
+        <span class="process-heatmap-value" id="process-heatmap-radius-value">90 px</span></label
+      >
+      <label class="process-shift-field" for="process-heatmap-opacity"
+        ><span class="process-shift-label">Opacity</span>
+        <input
+          type="range"
+          id="process-heatmap-opacity"
+          class="process-heatmap-range"
+          min="10"
+          max="100"
+          step="5"
+          value="55"
+          aria-label="Heatmap opacity percent"
+        />
+        <span class="process-heatmap-value" id="process-heatmap-opacity-value">55%</span></label
+      >
+    </div>
     <div class="process-toolbar process-toolbar--adjust">
       <label class="toolbar-toggle process-toolbar-toggle" title="Drag trail dots to adjust image pixel coordinates; use Save when ready">
         <input type="checkbox" id="process-nudge-trail" disabled />
@@ -903,7 +963,7 @@ app.innerHTML = `
       <input
         type="range"
         id="process-dot-size"
-        min="25"
+        min="1"
         max="250"
         step="5"
         value="100"
@@ -1070,6 +1130,16 @@ const processFsplDelta = document.querySelector<HTMLSpanElement>('#process-fspl-
 const processRssiAdjustWrap = document.querySelector<HTMLDivElement>('#process-rssi-adjust-wrap')!
 const processRssiOffsetInput = document.querySelector<HTMLInputElement>('#process-rssi-offset')!
 const processRssiOffsetReset = document.querySelector<HTMLButtonElement>('#process-rssi-offset-reset')!
+const processHeatmapWrap = document.querySelector<HTMLDivElement>('#process-heatmap-wrap')!
+const processShowHeatmapInput = document.querySelector<HTMLInputElement>('#process-show-heatmap')!
+const processHeatmapUseBoundaryInput = document.querySelector<HTMLInputElement>('#process-heatmap-use-boundary')!
+const processHeatmapDrawBoundaryInput = document.querySelector<HTMLInputElement>('#process-heatmap-draw-boundary')!
+const processHeatmapCloseBoundaryBtn = document.querySelector<HTMLButtonElement>('#process-heatmap-close-boundary')!
+const processHeatmapClearBoundaryBtn = document.querySelector<HTMLButtonElement>('#process-heatmap-clear-boundary')!
+const processHeatmapRadiusInput = document.querySelector<HTMLInputElement>('#process-heatmap-radius')!
+const processHeatmapOpacityInput = document.querySelector<HTMLInputElement>('#process-heatmap-opacity')!
+const processHeatmapRadiusValue = document.querySelector<HTMLSpanElement>('#process-heatmap-radius-value')!
+const processHeatmapOpacityValue = document.querySelector<HTMLSpanElement>('#process-heatmap-opacity-value')!
 const processNudgeTrail = document.querySelector<HTMLInputElement>('#process-nudge-trail')!
 const processNudgeSnap = document.querySelector<HTMLSelectElement>('#process-nudge-snap')!
 const processResetTrail = document.querySelector<HTMLButtonElement>('#process-reset-trail')!
@@ -1208,6 +1278,36 @@ function rgbLikeToHexForInput(css: string, fallback: string): string {
   return fallback
 }
 
+/** Parse rgb()/rgba() color strings from metric palettes. */
+function parseRgbLike(css: string): [number, number, number] | null {
+  const m = css.trim().match(/^rgba?\(\s*([+\-]?\d+)\s*,\s*([+\-]?\d+)\s*,\s*([+\-]?\d+)/i)
+  if (!m) return null
+  const r = Number(m[1])
+  const g = Number(m[2])
+  const b = Number(m[3])
+  if (![r, g, b].every((v) => Number.isFinite(v))) return null
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)))
+  return [clamp(r), clamp(g), clamp(b)]
+}
+
+function pointInPolygon(
+  x: number,
+  y: number,
+  poly: readonly { x: number; y: number }[]
+): boolean {
+  if (poly.length < 3) return false
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i]!.x
+    const yi = poly[i]!.y
+    const xj = poly[j]!.x
+    const yj = poly[j]!.y
+    const intersects = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi || 1e-9) + xi
+    if (intersects) inside = !inside
+  }
+  return inside
+}
+
 function applyViewTransform(): void {
   stageInner.style.setProperty('--map-pan-x', `${mapPanX}px`)
   stageInner.style.setProperty('--map-pan-y', `${mapPanY}px`)
@@ -1254,6 +1354,10 @@ function updateZoomPctLabel(): void {
 
 function clampPinDotScale(s: number): number {
   return Math.min(PIN_DOT_SCALE_MAX, Math.max(PIN_DOT_SCALE_MIN, s))
+}
+
+function clampProcessDotScale(s: number): number {
+  return Math.min(PIN_DOT_SCALE_MAX, Math.max(PROCESS_DOT_SCALE_MIN, s))
 }
 
 function updatePinSizeLabel(): void {
@@ -1951,6 +2055,8 @@ function rebuildProcessMergedFromFspl(): void {
 function updateProcessFsplChrome(): void {
   const has = processMergedPointsRaw.length > 0 || processRssiMergedPointsRaw.length > 0
   const hasRssi = processRssiMergedPointsRaw.length > 0
+  const hasMetricOverlay = processHasPlOverlay() || processHasRssiOverlay()
+  const hasMap = Boolean(processImg.naturalWidth)
   processFsplWrap.hidden = !has
   processFsplEnable.disabled = !has
   processFsplRef.disabled = !has
@@ -1958,6 +2064,17 @@ function updateProcessFsplChrome(): void {
   processRssiAdjustWrap.hidden = !hasRssi
   processRssiOffsetInput.disabled = !hasRssi
   processRssiOffsetReset.disabled = !hasRssi
+  processHeatmapWrap.hidden = !hasMetricOverlay
+  processShowHeatmapInput.disabled = !hasMetricOverlay
+  processHeatmapUseBoundaryInput.disabled = !hasMetricOverlay
+  processHeatmapDrawBoundaryInput.disabled = !hasMap
+  processHeatmapRadiusInput.disabled = !hasMetricOverlay || !processShowHeatmap
+  processHeatmapOpacityInput.disabled = !hasMetricOverlay || !processShowHeatmap
+  if (!hasMap) {
+    processHeatmapDrawBoundary = false
+    processHeatmapBoundaryDragIndex = null
+  }
+  syncProcessHeatmapControls()
   if (!has) {
     processFsplDelta.textContent = ''
   }
@@ -2004,6 +2121,11 @@ function clearProcessTrailState(): void {
   processRssiMergedPoints = []
   processRssiMergedPointsRaw = []
   processRssiUnmatchedTrailPoints = []
+  processHeatmapBoundaryPoints = []
+  processHeatmapBoundaryClosed = false
+  processHeatmapDrawBoundary = false
+  processHeatmapBoundaryDragIndex = null
+  processHeatmapUseBoundary = false
   processPlotMetric = 'rssi'
   processBundleSummaryOverride = null
   processRecentMapNameOverride = null
@@ -2150,6 +2272,14 @@ function collectCurrentProcessBundleSettings(): ProcessBundleSettingsV1 {
     },
     dotScale: processDotScale,
     rssiOffsetDb: processRssiOffsetDb,
+    heatmap: {
+      enabled: processShowHeatmap,
+      useBoundary: processHeatmapUseBoundary,
+      boundaryClosed: processHeatmapBoundaryClosed,
+      boundaryPoints: processHeatmapBoundaryPoints.map((p) => ({ x: p.x, y: p.y })),
+      radiusPx: processHeatmapRadiusPx,
+      opacity: processHeatmapOpacity,
+    },
     plotMetric: processPlotMetric,
     show: {
       pointLabels: processShowPlLabels.checked,
@@ -2179,7 +2309,7 @@ function applyProcessBundleSettings(settings: ProcessBundleSettingsV1): void {
     saveProcessPlanFlipToStorage()
   }
   if (typeof settings.dotScale === 'number' && Number.isFinite(settings.dotScale)) {
-    processDotScale = clampPinDotScale(settings.dotScale)
+    processDotScale = clampProcessDotScale(settings.dotScale)
     syncProcessDotSizeControl()
     saveProcessDotScaleToStorage()
   }
@@ -2187,6 +2317,33 @@ function applyProcessBundleSettings(settings: ProcessBundleSettingsV1): void {
     processRssiOffsetDb = settings.rssiOffsetDb
     syncProcessRssiOffsetInput()
     saveProcessRssiOffsetToStorage()
+  }
+  if (settings.heatmap) {
+    if (typeof settings.heatmap.enabled === 'boolean') {
+      processShowHeatmap = settings.heatmap.enabled
+    }
+    if (typeof settings.heatmap.radiusPx === 'number' && Number.isFinite(settings.heatmap.radiusPx)) {
+      processHeatmapRadiusPx = Math.max(20, Math.min(1000, settings.heatmap.radiusPx))
+    }
+    if (typeof settings.heatmap.opacity === 'number' && Number.isFinite(settings.heatmap.opacity)) {
+      processHeatmapOpacity = Math.max(0.1, Math.min(1, settings.heatmap.opacity))
+    }
+    if (typeof settings.heatmap.useBoundary === 'boolean') {
+      processHeatmapUseBoundary = settings.heatmap.useBoundary
+    }
+    if (typeof settings.heatmap.boundaryClosed === 'boolean') {
+      processHeatmapBoundaryClosed = settings.heatmap.boundaryClosed
+    }
+    if (Array.isArray(settings.heatmap.boundaryPoints)) {
+      processHeatmapBoundaryPoints = settings.heatmap.boundaryPoints.map((p) => ({ x: p.x, y: p.y }))
+    }
+    if (processHeatmapBoundaryPoints.length < 3) {
+      processHeatmapBoundaryClosed = false
+    }
+    processHeatmapBoundaryDragIndex = null
+    processHeatmapDrawBoundary = false
+    syncProcessHeatmapControls()
+    saveProcessHeatmapToStorage()
   }
   if (settings.plotMetric === 'path_loss' || settings.plotMetric === 'rssi') {
     processPlotMetric = settings.plotMetric
@@ -2224,7 +2381,7 @@ function loadProcessDotScaleFromStorage(): void {
     if (!raw) return
     const o = JSON.parse(raw) as { scale?: unknown }
     const s = Number(o.scale)
-    if (Number.isFinite(s)) processDotScale = clampPinDotScale(s)
+    if (Number.isFinite(s)) processDotScale = clampProcessDotScale(s)
   } catch {
     /* ignore */
   }
@@ -2272,6 +2429,82 @@ function commitProcessRssiOffsetFromInput(): void {
   drawProcessOverlay()
 }
 
+function loadProcessHeatmapFromStorage(): void {
+  processShowHeatmap = false
+  processHeatmapRadiusPx = 90
+  processHeatmapOpacity = 0.55
+  processHeatmapUseBoundary = false
+  processHeatmapBoundaryClosed = false
+  processHeatmapBoundaryPoints = []
+  processHeatmapBoundaryDragIndex = null
+  processHeatmapDrawBoundary = false
+  try {
+    const raw = localStorage.getItem(PROCESS_HEATMAP_STORAGE_KEY)
+    if (!raw) return
+    const o = JSON.parse(raw) as {
+      enabled?: unknown
+      radiusPx?: unknown
+      opacity?: unknown
+      useBoundary?: unknown
+      boundaryClosed?: unknown
+      boundaryPoints?: unknown
+    }
+    processShowHeatmap = Boolean(o.enabled)
+    const r = Number(o.radiusPx)
+    const a = Number(o.opacity)
+    if (Number.isFinite(r)) processHeatmapRadiusPx = Math.max(20, Math.min(1000, r))
+    if (Number.isFinite(a)) processHeatmapOpacity = Math.max(0.1, Math.min(1, a))
+    if (typeof o.useBoundary === 'boolean') processHeatmapUseBoundary = o.useBoundary
+    if (typeof o.boundaryClosed === 'boolean') processHeatmapBoundaryClosed = o.boundaryClosed
+    if (Array.isArray(o.boundaryPoints)) {
+      processHeatmapBoundaryPoints = o.boundaryPoints
+        .filter((p) => Boolean(p) && typeof p === 'object')
+        .map((p) => {
+          const rec = p as { x?: unknown; y?: unknown }
+          const x = Number(rec.x)
+          const y = Number(rec.y)
+          return { x, y }
+        })
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+    }
+    if (processHeatmapBoundaryPoints.length < 3) {
+      processHeatmapBoundaryClosed = false
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveProcessHeatmapToStorage(): void {
+  try {
+    localStorage.setItem(
+      PROCESS_HEATMAP_STORAGE_KEY,
+      JSON.stringify({
+        enabled: processShowHeatmap,
+        radiusPx: processHeatmapRadiusPx,
+        opacity: processHeatmapOpacity,
+        useBoundary: processHeatmapUseBoundary,
+        boundaryClosed: processHeatmapBoundaryClosed,
+        boundaryPoints: processHeatmapBoundaryPoints,
+      }),
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncProcessHeatmapControls(): void {
+  processShowHeatmapInput.checked = processShowHeatmap
+  processHeatmapUseBoundaryInput.checked = processHeatmapUseBoundary
+  processHeatmapDrawBoundaryInput.checked = processHeatmapDrawBoundary
+  processHeatmapRadiusInput.value = String(Math.round(processHeatmapRadiusPx))
+  processHeatmapOpacityInput.value = String(Math.round(processHeatmapOpacity * 100))
+  processHeatmapRadiusValue.textContent = `${Math.round(processHeatmapRadiusPx)} px`
+  processHeatmapOpacityValue.textContent = `${Math.round(processHeatmapOpacity * 100)}%`
+  processHeatmapCloseBoundaryBtn.disabled = processHeatmapBoundaryClosed || processHeatmapBoundaryPoints.length < 3
+  processHeatmapClearBoundaryBtn.disabled = processHeatmapBoundaryPoints.length === 0
+}
+
 function updateProcessDotSizeLabel(): void {
   processDotSizePctEl.textContent = `${Math.round(processDotScale * 100)}%`
 }
@@ -2309,6 +2542,73 @@ function findTrailHitIndex(clientX: number, clientY: number, dotR: number): numb
   return bestI
 }
 
+function clientToProcessBasePixel(clientX: number, clientY: number): { x: number; y: number } | null {
+  if (!processImg.naturalWidth) return null
+  const hit = clientToImagePixel(clientX, clientY, processImg)
+  if (!hit.ok) return null
+  return clampPixelToImage(
+    hit.pixel.x - processOverlayShiftX,
+    hit.pixel.y - processOverlayShiftY,
+    processImg.naturalWidth,
+    processImg.naturalHeight
+  )
+}
+
+function findBoundaryVertexHitIndex(clientX: number, clientY: number, hitSlop = 12): number | null {
+  if (!processHeatmapBoundaryPoints.length) return null
+  const local = clientToElementLocal(clientX, clientY, processCanvas)
+  if (!local) return null
+  let bestI: number | null = null
+  let bestD = Infinity
+  for (let i = 0; i < processHeatmapBoundaryPoints.length; i++) {
+    const p = processHeatmapBoundaryPoints[i]!
+    const q = processImgToOverlayLocal(p.x, p.y)
+    if (!q) continue
+    const d = Math.hypot(local.x - q.x, local.y - q.y)
+    if (d <= hitSlop && d < bestD) {
+      bestD = d
+      bestI = i
+    }
+  }
+  return bestI
+}
+
+function drawHeatmapBoundaryOverlay(ctx: CanvasRenderingContext2D): void {
+  if (!processHeatmapBoundaryPoints.length) return
+  const pts = processHeatmapBoundaryPoints
+    .map((p) => processImgToOverlayLocal(p.x, p.y))
+    .filter((p): p is { x: number; y: number } => Boolean(p))
+  if (!pts.length) return
+  ctx.save()
+  ctx.lineWidth = 2
+  ctx.strokeStyle = processHeatmapUseBoundary && processHeatmapBoundaryClosed ? '#ffe082' : '#ffd54f'
+  ctx.fillStyle = 'rgba(255, 213, 79, 0.18)'
+  ctx.beginPath()
+  ctx.moveTo(pts[0]!.x, pts[0]!.y)
+  for (let i = 1; i < pts.length; i++) {
+    ctx.lineTo(pts[i]!.x, pts[i]!.y)
+  }
+  if (processHeatmapBoundaryClosed && pts.length >= 3) {
+    ctx.closePath()
+    ctx.fill()
+  }
+  ctx.stroke()
+
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i]!
+    const isFirst = i === 0
+    const r = isFirst ? 4.5 : 3.5
+    ctx.beginPath()
+    ctx.fillStyle = isFirst && !processHeatmapBoundaryClosed ? '#fff59d' : '#ffeb3b'
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.strokeStyle = '#5d4037'
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+  ctx.restore()
+}
+
 function updateProcessTrailChrome(): void {
   const hasTrail = processTrailEditable.length > 0
   const hasMap = Boolean(processImg.naturalWidth)
@@ -2328,11 +2628,17 @@ function updateProcessTrailChrome(): void {
   if (!canNudge || processTrailEditable.length < 2) {
     processNudgeSnap.value = 'off'
   }
-  const allowPointer = canNudge && processNudgeTrail.checked
+  const allowNudge = canNudge && processNudgeTrail.checked
+  const allowBoundaryDraw = hasMap && processHeatmapDrawBoundary
+  const allowPointer = allowNudge || allowBoundaryDraw
   processCanvas.style.pointerEvents = allowPointer ? 'auto' : 'none'
   processCanvas.classList.toggle('process-overlay--adjust', allowPointer)
   if (allowPointer) {
-    processCanvas.style.cursor = processTrailDragIndex !== null ? 'grabbing' : 'grab'
+    if (allowBoundaryDraw) {
+      processCanvas.style.cursor = processHeatmapBoundaryDragIndex !== null ? 'grabbing' : 'crosshair'
+    } else {
+      processCanvas.style.cursor = processTrailDragIndex !== null ? 'grabbing' : 'grab'
+    }
   } else {
     processCanvas.style.cursor = ''
   }
@@ -2340,9 +2646,44 @@ function updateProcessTrailChrome(): void {
 
 function onTrailPointerDown(e: PointerEvent): void {
   if (e.altKey && e.button === 0) return
-  if (e.button !== 0 || !processNudgeTrail.checked) {
+  if (e.button !== 0) {
     return
   }
+  if (processHeatmapDrawBoundary && processImg.naturalWidth) {
+    const hitVertex = findBoundaryVertexHitIndex(e.clientX, e.clientY)
+    if (!processHeatmapBoundaryClosed && hitVertex === 0 && processHeatmapBoundaryPoints.length >= 3) {
+      processHeatmapBoundaryClosed = true
+      processHeatmapUseBoundary = true
+      syncProcessHeatmapControls()
+      saveProcessHeatmapToStorage()
+      drawProcessOverlay()
+      e.preventDefault()
+      return
+    }
+    if (hitVertex !== null) {
+      processHeatmapBoundaryDragIndex = hitVertex
+      processCanvas.setPointerCapture(e.pointerId)
+      updateProcessTrailChrome()
+      e.preventDefault()
+      return
+    }
+    if (processHeatmapBoundaryClosed) {
+      e.preventDefault()
+      return
+    }
+    const px = clientToProcessBasePixel(e.clientX, e.clientY)
+    if (!px) return
+    processHeatmapBoundaryPoints.push(px)
+    if (processHeatmapBoundaryPoints.length >= 3) {
+      processHeatmapUseBoundary = processHeatmapUseBoundaryInput.checked
+    }
+    syncProcessHeatmapControls()
+    saveProcessHeatmapToStorage()
+    drawProcessOverlay()
+    e.preventDefault()
+    return
+  }
+  if (!processNudgeTrail.checked) return
   const i = findTrailHitIndex(e.clientX, e.clientY, processTrailDotRadius())
   if (i === null) return
   e.preventDefault()
@@ -2460,17 +2801,20 @@ function applyNudgeAngleSnap(
 }
 
 function onTrailPointerMove(e: PointerEvent): void {
+  if (processHeatmapBoundaryDragIndex !== null && processImg.naturalWidth) {
+    const px = clientToProcessBasePixel(e.clientX, e.clientY)
+    if (!px) return
+    processHeatmapBoundaryPoints[processHeatmapBoundaryDragIndex] = px
+    drawProcessOverlay()
+    e.preventDefault()
+    return
+  }
   if (processTrailDragIndex === null || !processImg.naturalWidth) return
-  const hit = clientToImagePixel(e.clientX, e.clientY, processImg)
-  if (!hit.ok) return
   const iw = processImg.naturalWidth
   const ih = processImg.naturalHeight
-  let c = clampPixelToImage(
-    hit.pixel.x - processOverlayShiftX,
-    hit.pixel.y - processOverlayShiftY,
-    iw,
-    ih
-  )
+  const basePx = clientToProcessBasePixel(e.clientX, e.clientY)
+  if (!basePx) return
+  let c = basePx
   const idx = processTrailDragIndex
   const snapVal = processNudgeSnap.value
   if (snapVal !== 'off') {
@@ -2495,6 +2839,18 @@ function onTrailPointerMove(e: PointerEvent): void {
 }
 
 function onTrailPointerUp(e: PointerEvent): void {
+  if (processHeatmapBoundaryDragIndex !== null) {
+    processHeatmapBoundaryDragIndex = null
+    try {
+      processCanvas.releasePointerCapture(e.pointerId)
+    } catch {
+      /* already released */
+    }
+    drawProcessOverlay()
+    updateProcessTrailChrome()
+    saveProcessHeatmapToStorage()
+    return
+  }
   if (processTrailDragIndex === null) return
   processTrailDragIndex = null
   try {
@@ -2551,6 +2907,99 @@ function syncProcessOverlayCanvas(): void {
   }
 }
 
+function drawDistanceWeightedHeatmap(
+  ctx: CanvasRenderingContext2D,
+  merged: MergedPlotPoint[],
+  w: number,
+  h: number
+): void {
+  if (!processShowHeatmap || merged.length === 0 || w <= 1 || h <= 1) return
+  const effectiveRadiusPx = processHeatmapRadiusPx * 0.94
+  // Coarsen the working grid as radius grows to keep runtime practical.
+  const ds = Math.max(4, Math.min(24, Math.round(effectiveRadiusPx / 120)))
+  const gridW = Math.max(1, Math.ceil(w / ds))
+  const gridH = Math.max(1, Math.ceil(h / ds))
+  const n = gridW * gridH
+  const valSum = new Float32Array(n)
+  const wSum = new Float32Array(n)
+  const radiusCells = Math.max(1, effectiveRadiusPx / ds)
+  const radius2 = radiusCells * radiusCells
+  const boundaryOverlay: { x: number; y: number }[] =
+    processHeatmapUseBoundary && processHeatmapBoundaryClosed
+      ? processHeatmapBoundaryPoints
+          .map((p) => processImgToOverlayLocal(p.x, p.y))
+          .filter((p): p is { x: number; y: number } => Boolean(p))
+      : []
+  const useBoundaryMask = boundaryOverlay.length >= 3
+
+  for (const pt of merged) {
+    const q = processImgToOverlayLocal(pt.x, pt.y)
+    if (!q) continue
+    const cx = q.x / ds
+    const cy = q.y / ds
+    const x0 = Math.max(0, Math.floor(cx - radiusCells))
+    const x1 = Math.min(gridW - 1, Math.ceil(cx + radiusCells))
+    const y0 = Math.max(0, Math.floor(cy - radiusCells))
+    const y1 = Math.min(gridH - 1, Math.ceil(cy + radiusCells))
+    for (let gy = y0; gy <= y1; gy++) {
+      const dy = gy - cy
+      const dy2 = dy * dy
+      const row = gy * gridW
+      for (let gx = x0; gx <= x1; gx++) {
+        const dx = gx - cx
+        const d2 = dx * dx + dy2
+        if (d2 > radius2) continue
+        // Polynomial kernel keeps stronger influence at distance than inverse-square.
+        const t = 1 - d2 / radius2
+        const weight = t * t
+        const idx = row + gx
+        valSum[idx] += pt.pathLoss * weight
+        wSum[idx] += weight
+      }
+    }
+  }
+
+  if (!processHeatmapWorkCanvas) {
+    processHeatmapWorkCanvas = document.createElement('canvas')
+  }
+  const heatCanvas = processHeatmapWorkCanvas
+  heatCanvas.width = gridW
+  heatCanvas.height = gridH
+  const hctx = heatCanvas.getContext('2d')
+  if (!hctx) return
+  const imgData = hctx.createImageData(gridW, gridH)
+  const data = imgData.data
+  const baseAlpha = Math.max(0, Math.min(1, processHeatmapOpacity))
+
+  for (let i = 0; i < n; i++) {
+    const ws = wSum[i]!
+    if (ws <= 0) continue
+    if (useBoundaryMask) {
+      const gx = i % gridW
+      const gy = Math.floor(i / gridW)
+      const cx = (gx + 0.5) * ds
+      const cy = (gy + 0.5) * ds
+      if (!pointInPolygon(cx, cy, boundaryOverlay)) continue
+    }
+    const v = valSum[i]! / ws
+    const rgb = parseRgbLike(metricValueToColor(v))
+    if (!rgb) continue
+    const density = Math.min(1, Math.sqrt(ws) * 1.25)
+    const a = Math.round(255 * baseAlpha * density)
+    const p = i * 4
+    data[p] = rgb[0]
+    data[p + 1] = rgb[1]
+    data[p + 2] = rgb[2]
+    data[p + 3] = a
+  }
+
+  hctx.putImageData(imgData, 0, 0)
+  ctx.save()
+  ctx.imageSmoothingEnabled = true
+  ctx.drawImage(heatCanvas, 0, 0, gridW, gridH, 0, 0, w, h)
+  ctx.restore()
+}
+
 function drawProcessOverlay(): void {
   const ctx = processCanvas.getContext('2d')
   if (!ctx || !processImg.naturalWidth) {
@@ -2573,6 +3022,7 @@ function drawProcessOverlay(): void {
     updateProcessMetricWrapVisibility()
     const merged = getActiveProcessMerged()
     const unmatched = getActiveProcessUnmatched()
+    drawDistanceWeightedHeatmap(ctx, merged, w, h)
     const routeColors = getOverlayColors()
     const routePs = Math.min(1.2, Math.max(0.8, dotR / 5))
     const trailDiameter = 2 * dotR
@@ -2703,6 +3153,10 @@ function drawProcessOverlay(): void {
       processRssiMergedPointsRaw.length > 0 && Math.abs(processRssiOffsetDb) > 1e-9
         ? `<span>RSSI offset: <strong>${processRssiOffsetDb.toFixed(1)}</strong> dB (applied before FSPL)</span>`
         : ''
+    const heatmapLegend =
+      processShowHeatmap && merged.length > 0
+        ? `<span>Heatmap: distance-weighted, spread ≈ <strong>${Math.round(processHeatmapRadiusPx * 0.94)}</strong> px, opacity <strong>${Math.round(processHeatmapOpacity * 100)}%</strong>${processHeatmapUseBoundary && processHeatmapBoundaryClosed ? ' · boundary clip on' : ''}</span>`
+        : ''
     const metricLabel = processMetricIsRssiView() ? 'RSSI' : 'PL'
     const metricUnit = processMetricIsRssiView() ? 'dBm' : 'dB'
     const dataRangeSpan =
@@ -2722,9 +3176,11 @@ function drawProcessOverlay(): void {
     ${walkTypesLegend}
     ${unmatchedLegend}
     ${rssiOffsetLegend}
+    ${heatmapLegend}
     ${fsplLegend}
     ${dataRangeSpan}
   </div>`
+    drawHeatmapBoundaryOverlay(ctx)
     updateProcessHistogramTable()
     updateProcessFsplChrome()
     updateProcessTrailChrome()
@@ -2819,6 +3275,7 @@ function drawProcessOverlay(): void {
     processLegend.innerHTML = `<div class="process-legend-inner process-legend-inner--trail-preview">
     <span>Trail preview — <strong>${nUserTrail}</strong> original <span class="process-legend-user-ring" title="Original (non-interpolated) points — grey ring."></span> · <strong>${nInterpTrail}</strong> interpolated (no ring)</span>
   </div>`
+    drawHeatmapBoundaryOverlay(ctx)
     processHistogramWrap.hidden = true
     processHistogramBody.innerHTML = ''
     processColourScale.hidden = false
@@ -2832,6 +3289,7 @@ function drawProcessOverlay(): void {
   processHistogramBody.innerHTML = ''
   processColourScale.hidden = false
   processMetricWrap.hidden = true
+  drawHeatmapBoundaryOverlay(ctx)
   updateProcessTrailChrome()
 }
 
@@ -3792,6 +4250,11 @@ processShowPlLabels.addEventListener('change', () => drawProcessOverlay())
 processShowPlRoute.addEventListener('change', () => drawProcessOverlay())
 processShowPlColoredTrail.addEventListener('change', () => drawProcessOverlay())
 processNudgeTrail.addEventListener('change', () => {
+  if (processNudgeTrail.checked) {
+    processHeatmapDrawBoundary = false
+    processHeatmapBoundaryDragIndex = null
+    syncProcessHeatmapControls()
+  }
   processTrailDragIndex = null
   drawProcessOverlay()
 })
@@ -3823,6 +4286,8 @@ loadProcessDotScaleFromStorage()
 syncProcessDotSizeControl()
 loadProcessRssiOffsetFromStorage()
 syncProcessRssiOffsetInput()
+loadProcessHeatmapFromStorage()
+syncProcessHeatmapControls()
 processShiftXInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftYInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftReset.addEventListener('click', () => {
@@ -3851,8 +4316,66 @@ processRssiOffsetReset.addEventListener('click', () => {
   rebuildProcessMergedFromFspl()
   drawProcessOverlay()
 })
+processShowHeatmapInput.addEventListener('change', () => {
+  processShowHeatmap = processShowHeatmapInput.checked
+  syncProcessHeatmapControls()
+  updateProcessTrailChrome()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+})
+processHeatmapUseBoundaryInput.addEventListener('change', () => {
+  processHeatmapUseBoundary = processHeatmapUseBoundaryInput.checked
+  syncProcessHeatmapControls()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+})
+processHeatmapDrawBoundaryInput.addEventListener('change', () => {
+  processHeatmapDrawBoundary = processHeatmapDrawBoundaryInput.checked
+  if (processHeatmapDrawBoundary) {
+    processNudgeTrail.checked = false
+    processTrailDragIndex = null
+  } else {
+    processHeatmapBoundaryDragIndex = null
+  }
+  syncProcessHeatmapControls()
+  updateProcessTrailChrome()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+})
+processHeatmapCloseBoundaryBtn.addEventListener('click', () => {
+  if (processHeatmapBoundaryPoints.length < 3) return
+  processHeatmapBoundaryClosed = true
+  processHeatmapUseBoundary = true
+  processHeatmapBoundaryDragIndex = null
+  syncProcessHeatmapControls()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+})
+processHeatmapClearBoundaryBtn.addEventListener('click', () => {
+  processHeatmapBoundaryPoints = []
+  processHeatmapBoundaryClosed = false
+  processHeatmapBoundaryDragIndex = null
+  processHeatmapUseBoundary = false
+  syncProcessHeatmapControls()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+})
+processHeatmapRadiusInput.addEventListener('input', () => {
+  const v = Number(processHeatmapRadiusInput.value)
+  processHeatmapRadiusPx = Number.isFinite(v) ? Math.max(20, Math.min(1000, v)) : 90
+  syncProcessHeatmapControls()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+})
+processHeatmapOpacityInput.addEventListener('input', () => {
+  const v = Number(processHeatmapOpacityInput.value)
+  processHeatmapOpacity = Number.isFinite(v) ? Math.max(0.1, Math.min(1, v / 100)) : 0.55
+  syncProcessHeatmapControls()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+})
 processDotSizeRange.addEventListener('input', () => {
-  processDotScale = clampPinDotScale(Number(processDotSizeRange.value) / 100)
+  processDotScale = clampProcessDotScale(Number(processDotSizeRange.value) / 100)
   updateProcessDotSizeLabel()
   saveProcessDotScaleToStorage()
   drawProcessOverlay()
