@@ -126,6 +126,7 @@ Selected file **names** are listed under the buttons so you can confirm what is 
 ## Known issues and bugs
 
 - **Process tab — Chrome on Android:** Choosing **Walkplotter CSV**, **Path loss CSV**, **RSSI CSV**, or **Load bundle** may open **Camera** or **Photos** instead of a file/documents picker. This comes from mobile Chrome’s handling of file inputs on many devices; several UI and `accept`-attribute workarounds have not fixed it reliably here. **Practical workaround:** run **Process** in a **desktop** browser, or copy the CSVs / bundle to a PC and load them there. (Floor plan + **Map** / **Controls** use on Android is unaffected.)
+- **Process tab — Heatmap boundary draw near bottom edge:** In some layouts/screens, adding polygon vertices near the **bottom edge** of the map may fail while other edges work. This is tracked as a known bug to be fixed. **Workaround:** place boundary points slightly above the bottom edge and adjust shape with vertex dragging where possible.
 
 ---
 
