@@ -359,6 +359,10 @@ function exportMapSnapshotJpeg(filename: string): void {
 
 /** Bundled test plan: place or replace `public/floorimage.jpg` (e.g. copy your `test floorimage.jpg` there). */
 const DEFAULT_FLOOR_IMAGE = `${import.meta.env.BASE_URL}floorimage.jpg`
+const DEFAULT_PROCESS_DATA_BUNDLE_FILENAME = 'walkplotter-process-bundle-2026-04-18-08-41-52.json'
+const DEFAULT_PROCESS_CONFIG_FILENAME = 'walkplotter-process-config-2026-04-18-12-52-08.json'
+const DEFAULT_PROCESS_DATA_BUNDLE = `${import.meta.env.BASE_URL}demo/${DEFAULT_PROCESS_DATA_BUNDLE_FILENAME}`
+const DEFAULT_PROCESS_CONFIG = `${import.meta.env.BASE_URL}demo/${DEFAULT_PROCESS_CONFIG_FILENAME}`
 
 function applyMapFloorPlanBlob(blob: Blob, fileName: string): void {
   if (!blob.type.startsWith('image/')) return
@@ -411,6 +415,34 @@ async function loadDefaultFloorPlan(): Promise<void> {
   img.src = DEFAULT_FLOOR_IMAGE
   updateChrome()
   setTab('map')
+}
+
+async function loadDefaultProcessDataAndConfig(): Promise<void> {
+  try {
+    const bundleRes = await fetch(DEFAULT_PROCESS_DATA_BUNDLE)
+    if (!bundleRes.ok) return
+    const bundleText = await bundleRes.text()
+    const bundle = parseProcessBundleJson(bundleText)
+    if (!bundle) return
+    await applyProcessBundle(bundle)
+    loadedProcessDataBundleFilename = DEFAULT_PROCESS_DATA_BUNDLE_FILENAME
+
+    const configRes = await fetch(DEFAULT_PROCESS_CONFIG)
+    if (configRes.ok) {
+      const configText = await configRes.text()
+      const config = parseProcessConfigJson(configText)
+      if (config) {
+        applyProcessConfig(config)
+        loadedProcessConfigFilename = DEFAULT_PROCESS_CONFIG_FILENAME
+        loadedProcessConfigBaselineSig = buildCurrentProcessConfigComparableSig()
+      }
+    }
+
+    updateProcessFileSummary()
+    processStatus.textContent = 'Loaded default demo data bundle and process config.'
+  } catch {
+    /* ignore missing demo defaults */
+  }
 }
 
 function clampMapZoom(z: number): number {
@@ -5535,3 +5567,4 @@ fillFsplSelectOptions()
 initProcessPlColourScale()
 updateChrome()
 void loadDefaultFloorPlan()
+void loadDefaultProcessDataAndConfig()
