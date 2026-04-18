@@ -664,6 +664,60 @@ body {
   min-height: 0;
 }
 
+.tab-panel--rssi-graph {
+  min-height: 0;
+}
+
+.rssi-graph-status {
+  margin-top: -2px;
+}
+
+.rssi-graph-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.rssi-graph-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.rssi-graph-field input {
+  width: 5.5rem;
+  font: inherit;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.rssi-graph-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.rssi-graph-wrap {
+  flex: 1;
+  min-height: 0;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #0f1c19;
+  padding: 8px;
+}
+
+.rssi-graph-canvas {
+  width: 100%;
+  height: min(56vh, 460px);
+  display: block;
+  border-radius: 8px;
+}
+
 .process-hint code {
   font-size: 12px;
   background: rgba(0, 0, 0, 0.25);

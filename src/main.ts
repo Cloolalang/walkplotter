@@ -19,6 +19,7 @@ import {
   extractWalkplotterTestDate,
   extractWalkplotterTimestampInfo,
   mergeByNearestTime,
+  parseDurationHmsToMs,
   parsePathLossCsv,
   parseRssiCsv,
   parseWalkplotterEditable,
@@ -28,6 +29,7 @@ import type {
   EditableTrailRow,
   MergeTimeOptions,
   MergedPlotPoint,
+  PathLossRow,
   UnmatchedTrailPoint,
   WalkplotterTrailRow,
 } from './processMerge'
@@ -92,6 +94,12 @@ let processTrailEditable: EditableTrailRow[] = []
 let processTrailOriginal: EditableTrailRow[] = []
 let processWalkTestDate: string | null = null
 let processTrailDragIndex: number | null = null
+let currentTab: 'map' | 'controls' | 'process' | 'rssi_graph' = 'map'
+let processRssiRollingEnabled = false
+let processRssiRollingWindow = 5
+let processRssiLeeEnabled = false
+let processRssiLeeFreqMhz = 2400
+let processRssiLeeSpeedMps = 1
 
 const PROCESS_OVERLAY_SHIFT_STORAGE_KEY = 'walkplotter-process-overlay-shift-v1'
 /** Draw trail and RF overlay at (x + Δx, y + Δy) in intrinsic image pixels (display-only until you nudge and save). */
@@ -570,6 +578,7 @@ app.innerHTML = `
     <button type="button" class="tab-btn" role="tab" id="tab-map" aria-selected="true" aria-controls="panel-map">Map</button>
     <button type="button" class="tab-btn" role="tab" id="tab-controls" aria-selected="false" aria-controls="panel-controls" tabindex="-1">Controls</button>
     <button type="button" class="tab-btn" role="tab" id="tab-process" aria-selected="false" aria-controls="panel-process" tabindex="-1">Process</button>
+    <button type="button" class="tab-btn" role="tab" id="tab-rssi-graph" aria-selected="false" aria-controls="panel-rssi-graph" tabindex="-1">RSSI pre-process filtering</button>
   </div>
 
   <div class="tab-panel tab-panel--map" id="panel-map" role="tabpanel" aria-labelledby="tab-map">
@@ -985,6 +994,71 @@ app.innerHTML = `
       <p class="empty process-placeholder" id="process-placeholder">Load a map image to see the overlay.</p>
     </div>
   </div>
+  <div class="tab-panel tab-panel--rssi-graph" id="panel-rssi-graph" role="tabpanel" aria-labelledby="tab-rssi-graph" hidden>
+    <p class="hint">
+      View the RSSI CSV as a time-series graph. Load an <strong>RSSI CSV</strong> in the <strong>Process</strong> tab first; this chart uses the same parser.
+    </p>
+    <div class="rssi-graph-toolbar">
+      <label class="toolbar-toggle process-toolbar-toggle" title="Apply a simple rolling average to RSSI samples">
+        <input type="checkbox" id="rssi-graph-rolling-enable" />
+        Rolling average
+      </label>
+      <label class="rssi-graph-field" for="rssi-graph-rolling-window"
+        ><span>Window (samples)</span>
+        <input
+          type="number"
+          id="rssi-graph-rolling-window"
+          min="2"
+          max="5000"
+          step="1"
+          value="5"
+          inputmode="numeric"
+        />
+      </label>
+      <button
+        type="button"
+        class="btn"
+        id="rssi-graph-save-filtered"
+        title="Download filtered RSSI CSV for later re-load/bundle use"
+        disabled
+      >
+        Save filtered RSSI CSV
+      </button>
+      <label class="toolbar-toggle process-toolbar-toggle" title="Lee criterion spatial averaging (window derived from frequency and walking speed)">
+        <input type="checkbox" id="rssi-graph-lee-enable" />
+        Lee criterion
+      </label>
+      <label class="rssi-graph-field" for="rssi-graph-lee-freq"
+        ><span>Frequency (MHz)</span>
+        <input
+          type="number"
+          id="rssi-graph-lee-freq"
+          min="100"
+          max="10000"
+          step="1"
+          value="2400"
+          inputmode="decimal"
+        />
+      </label>
+      <label class="rssi-graph-field" for="rssi-graph-lee-speed"
+        ><span>Walking speed (m/s)</span>
+        <input
+          type="number"
+          id="rssi-graph-lee-speed"
+          min="0.05"
+          max="5"
+          step="0.05"
+          value="1"
+          inputmode="decimal"
+        />
+      </label>
+      <span class="rssi-graph-note" id="rssi-graph-filter-note">Raw RSSI values (no filter).</span>
+    </div>
+    <p class="hint rssi-graph-status" id="rssi-graph-status">Load an RSSI CSV in Process to graph it here.</p>
+    <div class="rssi-graph-wrap">
+      <canvas id="rssi-graph-canvas" class="rssi-graph-canvas" aria-label="RSSI time series graph"></canvas>
+    </div>
+  </div>
 
   <dialog class="save-dialog" id="save-dialog">
     <form id="save-form">
@@ -1096,9 +1170,20 @@ const hintMap = document.querySelector<HTMLParagraphElement>('#hint-map')!
 const tabMap = document.querySelector<HTMLButtonElement>('#tab-map')!
 const tabControls = document.querySelector<HTMLButtonElement>('#tab-controls')!
 const tabProcess = document.querySelector<HTMLButtonElement>('#tab-process')!
+const tabRssiGraph = document.querySelector<HTMLButtonElement>('#tab-rssi-graph')!
 const panelMap = document.querySelector<HTMLDivElement>('#panel-map')!
 const panelControls = document.querySelector<HTMLDivElement>('#panel-controls')!
 const panelProcess = document.querySelector<HTMLDivElement>('#panel-process')!
+const panelRssiGraph = document.querySelector<HTMLDivElement>('#panel-rssi-graph')!
+const rssiGraphStatus = document.querySelector<HTMLParagraphElement>('#rssi-graph-status')!
+const rssiGraphCanvas = document.querySelector<HTMLCanvasElement>('#rssi-graph-canvas')!
+const rssiGraphRollingEnable = document.querySelector<HTMLInputElement>('#rssi-graph-rolling-enable')!
+const rssiGraphRollingWindowInput = document.querySelector<HTMLInputElement>('#rssi-graph-rolling-window')!
+const rssiGraphSaveFilteredBtn = document.querySelector<HTMLButtonElement>('#rssi-graph-save-filtered')!
+const rssiGraphLeeEnable = document.querySelector<HTMLInputElement>('#rssi-graph-lee-enable')!
+const rssiGraphLeeFreqInput = document.querySelector<HTMLInputElement>('#rssi-graph-lee-freq')!
+const rssiGraphLeeSpeedInput = document.querySelector<HTMLInputElement>('#rssi-graph-lee-speed')!
+const rssiGraphFilterNote = document.querySelector<HTMLSpanElement>('#rssi-graph-filter-note')!
 const processImg = document.querySelector<HTMLImageElement>('#process-plan')!
 const processCanvas = document.querySelector<HTMLCanvasElement>('#process-overlay')!
 const processStage = document.querySelector<HTMLDivElement>('#process-stage')!
@@ -1929,8 +2014,13 @@ function updateProcessHistogramTable(): void {
   const binMid = rssiView ? rssiBinMidColor : pathLossBinMidColor
   const rangeLabel = rssiView ? formatRssiBinLabel : formatPathLossBinLabel
   const rangeTh = rssiView ? 'Range (dBm)' : 'Range (dB)'
+  const rssiDataSuffix = processRssiLeeEnabled
+    ? `filtered data = Lee criterion<f=${clampRssiLeeFreqMhz(processRssiLeeFreqMhz).toFixed(0)} MHz, v=${clampRssiLeeSpeedMps(processRssiLeeSpeedMps).toFixed(2)} m/s>`
+    : processRssiRollingEnabled
+      ? `filtered data = rolling average<${processRssiRollingWindow}>`
+      : 'Raw data'
   processHistogramTitle.textContent = rssiView
-    ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm) (sample rate decimated to 1/second)`
+    ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm) (sample rate decimated to 1/second) ${rssiDataSuffix}`
     : `Path loss histogram (${PROCESS_HIST_BIN_WIDTH_DB} dB bins, down to −120 dB)`
   processHistogramRangeTh.textContent = rangeTh
   processHistogramPie.setAttribute(
@@ -2098,6 +2188,10 @@ function updateProcessFileSummary(): void {
     processFilenamePl.textContent = processBundleSummaryOverride.pl
     processFilenameRssi.textContent = processBundleSummaryOverride.rssi
     updateProcessBundleButtons()
+    updateRssiGraphSaveButton()
+    if (currentTab === 'rssi_graph') {
+      drawRssiGraph()
+    }
     return
   }
   const label = (f: File | undefined) => f?.name ?? '—'
@@ -2106,6 +2200,10 @@ function updateProcessFileSummary(): void {
   processFilenamePl.textContent = label(processFilePl.files?.[0])
   processFilenameRssi.textContent = label(processFileRssi.files?.[0])
   updateProcessBundleButtons()
+  updateRssiGraphSaveButton()
+  if (currentTab === 'rssi_graph') {
+    drawRssiGraph()
+  }
 }
 
 function clearProcessTrailState(): void {
@@ -2554,16 +2652,7 @@ function clientToProcessBasePixel(clientX: number, clientY: number): { x: number
   const iw = processImg.naturalWidth
   const ih = processImg.naturalHeight
   if (bw <= 0 || bh <= 0 || iw <= 0 || ih <= 0) return null
-  const outsideTol = 12
-  if (
-    imgLocalX < -outsideTol ||
-    imgLocalX > bw + outsideTol ||
-    imgLocalY < -outsideTol ||
-    imgLocalY > bh + outsideTol
-  ) {
-    return null
-  }
-  // Accept near-edge clicks by clamping into image bounds.
+  // Clamp into image bounds so edge clicks still resolve to valid pixels.
   const lx = Math.max(0, Math.min(bw, imgLocalX))
   const ly = Math.max(0, Math.min(bh, imgLocalY))
   const x = (lx / bw) * iw
@@ -2574,6 +2663,50 @@ function clientToProcessBasePixel(clientX: number, clientY: number): { x: number
     processImg.naturalWidth,
     processImg.naturalHeight
   )
+}
+
+function handleBoundaryPointerDown(e: PointerEvent): boolean {
+  if (!processHeatmapDrawBoundary || !processImg.naturalWidth) return false
+  if (e.button !== 0 || e.altKey) return false
+  const hitVertex = findBoundaryVertexHitIndex(e.clientX, e.clientY)
+  if (!processHeatmapBoundaryClosed && hitVertex === 0 && processHeatmapBoundaryPoints.length >= 3) {
+    processHeatmapBoundaryClosed = true
+    processHeatmapUseBoundary = true
+    syncProcessHeatmapControls()
+    saveProcessHeatmapToStorage()
+    drawProcessOverlay()
+    e.preventDefault()
+    return true
+  }
+  if (hitVertex !== null) {
+    processHeatmapBoundaryDragIndex = hitVertex
+    try {
+      processCanvas.setPointerCapture(e.pointerId)
+    } catch {
+      /* ignore capture failures */
+    }
+    updateProcessTrailChrome()
+    e.preventDefault()
+    return true
+  }
+  if (processHeatmapBoundaryClosed) {
+    e.preventDefault()
+    return true
+  }
+  const px = clientToProcessBasePixel(e.clientX, e.clientY)
+  if (!px) {
+    e.preventDefault()
+    return true
+  }
+  processHeatmapBoundaryPoints.push(px)
+  if (processHeatmapBoundaryPoints.length >= 3) {
+    processHeatmapUseBoundary = processHeatmapUseBoundaryInput.checked
+  }
+  syncProcessHeatmapControls()
+  saveProcessHeatmapToStorage()
+  drawProcessOverlay()
+  e.preventDefault()
+  return true
 }
 
 function findBoundaryVertexHitIndex(clientX: number, clientY: number, hitSlop = 12): number | null {
@@ -2671,40 +2804,7 @@ function onTrailPointerDown(e: PointerEvent): void {
   if (e.button !== 0) {
     return
   }
-  if (processHeatmapDrawBoundary && processImg.naturalWidth) {
-    const hitVertex = findBoundaryVertexHitIndex(e.clientX, e.clientY)
-    if (!processHeatmapBoundaryClosed && hitVertex === 0 && processHeatmapBoundaryPoints.length >= 3) {
-      processHeatmapBoundaryClosed = true
-      processHeatmapUseBoundary = true
-      syncProcessHeatmapControls()
-      saveProcessHeatmapToStorage()
-      drawProcessOverlay()
-      e.preventDefault()
-      return
-    }
-    if (hitVertex !== null) {
-      processHeatmapBoundaryDragIndex = hitVertex
-      processCanvas.setPointerCapture(e.pointerId)
-      updateProcessTrailChrome()
-      e.preventDefault()
-      return
-    }
-    if (processHeatmapBoundaryClosed) {
-      e.preventDefault()
-      return
-    }
-    const px = clientToProcessBasePixel(e.clientX, e.clientY)
-    if (!px) return
-    processHeatmapBoundaryPoints.push(px)
-    if (processHeatmapBoundaryPoints.length >= 3) {
-      processHeatmapUseBoundary = processHeatmapUseBoundaryInput.checked
-    }
-    syncProcessHeatmapControls()
-    saveProcessHeatmapToStorage()
-    drawProcessOverlay()
-    e.preventDefault()
-    return
-  }
+  if (handleBoundaryPointerDown(e)) return
   if (!processNudgeTrail.checked) return
   const i = findTrailHitIndex(e.clientX, e.clientY, processTrailDotRadius())
   if (i === null) return
@@ -3561,7 +3661,8 @@ function runProcessPlot(): void {
       }
       if (wantRssi) {
         const rssiText = rssiFile ? await readFileAsText(rssiFile) : processRssiCsvText
-        const rssiRows = parseRssiCsv(rssiText)
+        const parsedRssi = getFilteredRssiRowsFromText(rssiText)
+        const rssiRows = parsedRssi.rows
         if (!rssiRows.length) {
           processRssiMergedPoints = []
           processRssiMergedPointsRaw = []
@@ -3590,7 +3691,12 @@ function runProcessPlot(): void {
               ru.length > 0
                 ? ` ${ru.length} trail pt(s) had no RSSI within ${dtSec}s (black dots).`
                 : ''
-            parts.push(`RSSI: matched ${rm.length} of ${processTrailEditable.length} trail samples.${uMsg}`)
+            const fMsg = parsedRssi.filtered
+              ? ` Filter applied: ${parsedRssi.detail}.`
+              : ''
+            parts.push(
+              `RSSI: matched ${rm.length} of ${processTrailEditable.length} trail samples.${uMsg}${fMsg}`
+            )
           }
         }
       }
@@ -3686,24 +3792,420 @@ function syncMapClock(): void {
   }
 }
 
-function setTab(which: 'map' | 'controls' | 'process'): void {
+type RssiGraphAxisMode = 'index' | 'elapsed_ms'
+const SPEED_OF_LIGHT_MPS = 299_792_458
+
+type RssiGraphSample = {
+  x: number
+  y: number
+}
+
+function parseWallClockToMsOfDay(hms: string): number | null {
+  const m = /^(\d{1,2}):(\d{2}):(\d{2})(\.\d+)?$/.exec(hms.trim())
+  if (!m) return null
+  const h = Number(m[1])
+  const mi = Number(m[2])
+  const sec = Number(m[3])
+  let ms = 0
+  if (m[4]) {
+    const frac = parseFloat(m[4]!)
+    if (Number.isFinite(frac)) ms = Math.round(frac * 1000)
+  }
+  if (!Number.isFinite(h) || !Number.isFinite(mi) || !Number.isFinite(sec)) return null
+  if (h < 0 || h > 23 || mi < 0 || mi > 59 || sec < 0 || sec > 59) return null
+  return ((h * 60 + mi) * 60 + sec) * 1000 + ms
+}
+
+function formatMsAsClockLike(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function clampRssiRollingWindow(v: number): number {
+  const n = Number.isFinite(v) ? Math.round(v) : 5
+  return Math.max(2, Math.min(5000, n))
+}
+
+function clampRssiLeeFreqMhz(v: number): number {
+  return Math.max(100, Math.min(10000, Number.isFinite(v) ? v : 2400))
+}
+
+function clampRssiLeeSpeedMps(v: number): number {
+  return Math.max(0.05, Math.min(5, Number.isFinite(v) ? v : 1))
+}
+
+function applyRssiRollingAverage(rows: PathLossRow[], windowSize: number): PathLossRow[] {
+  if (rows.length <= 1 || windowSize <= 1) return rows.map((r) => ({ ...r }))
+  const w = clampRssiRollingWindow(windowSize)
+  const half = Math.floor(w / 2)
+  const out: PathLossRow[] = []
+  for (let i = 0; i < rows.length; i++) {
+    const i0 = Math.max(0, i - half)
+    const i1 = Math.min(rows.length - 1, i + half)
+    let sum = 0
+    let cnt = 0
+    for (let j = i0; j <= i1; j++) {
+      sum += rows[j]!.pathLoss
+      cnt++
+    }
+    out.push({
+      ...rows[i]!,
+      pathLoss: cnt > 0 ? sum / cnt : rows[i]!.pathLoss,
+    })
+  }
+  return out
+}
+
+function estimateRssiSampleStepSec(rows: PathLossRow[]): number {
+  if (rows.length < 2) return 1
+  const built = buildRssiGraphSamples(rows)
+  if (built.axisMode !== 'elapsed_ms' || built.samples.length < 2) return 1
+  const diffsSec: number[] = []
+  for (let i = 1; i < built.samples.length; i++) {
+    const dtSec = (built.samples[i]!.x - built.samples[i - 1]!.x) / 1000
+    if (Number.isFinite(dtSec) && dtSec > 0) diffsSec.push(dtSec)
+  }
+  if (!diffsSec.length) return 1
+  diffsSec.sort((a, b) => a - b)
+  const mid = Math.floor(diffsSec.length / 2)
+  return diffsSec.length % 2 ? diffsSec[mid]! : (diffsSec[mid - 1]! + diffsSec[mid]!) / 2
+}
+
+function estimateLeeWindowSamples(rows: PathLossRow[]): number {
+  const fMhz = clampRssiLeeFreqMhz(processRssiLeeFreqMhz)
+  const speed = clampRssiLeeSpeedMps(processRssiLeeSpeedMps)
+  const wavelengthM = SPEED_OF_LIGHT_MPS / (fMhz * 1_000_000)
+  const leeDistanceM = 40 * wavelengthM
+  const dtSec = Math.max(0.02, estimateRssiSampleStepSec(rows))
+  const perSampleM = Math.max(1e-6, speed * dtSec)
+  return clampRssiRollingWindow(Math.max(2, Math.round(leeDistanceM / perSampleM)))
+}
+
+function hasRssiCsvLoaded(): boolean {
+  return processRssiCsvText.trim().length > 0 || Boolean(processFileRssi.files?.[0])
+}
+
+function updateRssiGraphSaveButton(): void {
+  const canSave = (processRssiRollingEnabled || processRssiLeeEnabled) && hasRssiCsvLoaded()
+  rssiGraphSaveFilteredBtn.disabled = !canSave
+  rssiGraphSaveFilteredBtn.title = canSave
+    ? 'Download the rolling-average filtered RSSI CSV (time,rssi) for re-load/bundle workflows'
+    : 'Enable rolling average and load an RSSI CSV to save filtered output'
+}
+
+function maybeAutoReplotAfterRssiFilterChange(): void {
+  const hasMap = Boolean(processImg.naturalWidth)
+  const hasTrail = processTrailEditable.length > 0
+  if (hasMap && hasTrail && hasRssiCsvLoaded()) {
+    runProcessPlot()
+  }
+}
+
+function defaultFilteredRssiFilename(): string {
+  const src = processFileRssi.files?.[0]?.name ?? 'walkplotter-rssi'
+  const stem = src.replace(/\.csv$/i, '')
+  return safeCsvFilename(`${stem}-filtered.csv`)
+}
+
+function formatRssiCsvValue(v: number): string {
+  const s = v.toFixed(3)
+  return s.replace(/\.?0+$/, '')
+}
+
+function csvCellEscape(v: string): string {
+  if (/[",\r\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`
+  return v
+}
+
+function buildFilteredRssiCsvText(rows: PathLossRow[]): string {
+  const lines = ['time,rssi']
+  for (const r of rows) {
+    lines.push(`${csvCellEscape(r.time)},${formatRssiCsvValue(r.pathLoss)}`)
+  }
+  return `${lines.join('\r\n')}\r\n`
+}
+
+function downloadFilteredRssiCsv(): void {
+  const csv = processRssiCsvText.trim()
+  if (!csv) {
+    rssiGraphStatus.textContent = 'Load an RSSI CSV first.'
+    return
+  }
+  if (!processRssiRollingEnabled && !processRssiLeeEnabled) {
+    rssiGraphStatus.textContent = 'Enable rolling average or Lee criterion first, then save filtered RSSI CSV.'
+    return
+  }
+  const parsed = getFilteredRssiRowsFromText(csv)
+  if (!parsed.rows.length) {
+    rssiGraphStatus.textContent =
+      'No RSSI rows parsed. Expected `time` and `rssi` columns, or first two columns as time + dBm.'
+    return
+  }
+  const text = buildFilteredRssiCsvText(parsed.rows)
+  const filename = defaultFilteredRssiFilename()
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+  rssiGraphStatus.textContent = `Saved filtered RSSI CSV: ${filename} (${parsed.rows.length} rows, ${parsed.detail}).`
+}
+
+function getFilteredRssiRowsFromText(text: string): {
+  rows: PathLossRow[]
+  rawCount: number
+  filtered: boolean
+  mode: 'raw' | 'rolling' | 'lee'
+  detail: string
+} {
+  const rawRows = parseRssiCsv(text)
+  if (!rawRows.length) return { rows: [], rawCount: 0, filtered: false, mode: 'raw', detail: 'raw' }
+  if (processRssiLeeEnabled) {
+    const win = estimateLeeWindowSamples(rawRows)
+    const filteredRows = applyRssiRollingAverage(rawRows, win)
+    return {
+      rows: filteredRows,
+      rawCount: rawRows.length,
+      filtered: true,
+      mode: 'lee',
+      detail: `Lee criterion (f=${clampRssiLeeFreqMhz(processRssiLeeFreqMhz).toFixed(0)} MHz, v=${clampRssiLeeSpeedMps(processRssiLeeSpeedMps).toFixed(2)} m/s, window ${win})`,
+    }
+  }
+  if (!processRssiRollingEnabled) {
+    return { rows: rawRows, rawCount: rawRows.length, filtered: false, mode: 'raw', detail: 'raw' }
+  }
+  const filteredRows = applyRssiRollingAverage(rawRows, processRssiRollingWindow)
+  return {
+    rows: filteredRows,
+    rawCount: rawRows.length,
+    filtered: true,
+    mode: 'rolling',
+    detail: `rolling average window ${processRssiRollingWindow}`,
+  }
+}
+
+function syncRssiGraphFilterControls(): void {
+  rssiGraphRollingEnable.checked = processRssiRollingEnabled
+  rssiGraphLeeEnable.checked = processRssiLeeEnabled
+  rssiGraphRollingWindowInput.value = String(processRssiRollingWindow)
+  rssiGraphLeeFreqInput.value = String(clampRssiLeeFreqMhz(processRssiLeeFreqMhz))
+  rssiGraphLeeSpeedInput.value = String(clampRssiLeeSpeedMps(processRssiLeeSpeedMps))
+  rssiGraphRollingWindowInput.disabled = !processRssiRollingEnabled || processRssiLeeEnabled
+  rssiGraphLeeFreqInput.disabled = !processRssiLeeEnabled
+  rssiGraphLeeSpeedInput.disabled = !processRssiLeeEnabled
+  if (processRssiLeeEnabled) {
+    rssiGraphFilterNote.textContent =
+      `Lee criterion enabled (f=${clampRssiLeeFreqMhz(processRssiLeeFreqMhz).toFixed(0)} MHz, v=${clampRssiLeeSpeedMps(processRssiLeeSpeedMps).toFixed(2)} m/s). Used by RSSI graph and Plot overlay.`
+  } else if (processRssiRollingEnabled) {
+    rssiGraphFilterNote.textContent =
+      `Rolling average enabled (window ${processRssiRollingWindow} samples). Used by RSSI graph and Plot overlay.`
+  } else {
+    rssiGraphFilterNote.textContent = 'Raw RSSI values (no filter).'
+  }
+  updateRssiGraphSaveButton()
+}
+
+function buildRssiGraphSamples(
+  rows: ReturnType<typeof parseRssiCsv>
+): { samples: RssiGraphSample[]; axisMode: RssiGraphAxisMode } {
+  if (!rows.length) return { samples: [], axisMode: 'index' }
+  if (rows.every((r) => typeof r.absoluteTimeMs === 'number' && Number.isFinite(r.absoluteTimeMs))) {
+    const base = rows[0]!.absoluteTimeMs as number
+    return {
+      samples: rows.map((r) => ({
+        x: (r.absoluteTimeMs as number) - base,
+        y: r.pathLoss,
+      })),
+      axisMode: 'elapsed_ms',
+    }
+  }
+  const dur = rows.map((r) => parseDurationHmsToMs(r.time))
+  if (dur.every((v) => v != null)) {
+    const base = dur[0] as number
+    return {
+      samples: rows.map((r, i) => ({
+        x: (dur[i] as number) - base,
+        y: r.pathLoss,
+      })),
+      axisMode: 'elapsed_ms',
+    }
+  }
+  const wall = rows.map((r) => parseWallClockToMsOfDay(r.time))
+  if (wall.every((v) => v != null)) {
+    const dayMs = 24 * 60 * 60 * 1000
+    let dayOffset = 0
+    let prev = wall[0] as number
+    const unfolded: number[] = [prev]
+    for (let i = 1; i < wall.length; i++) {
+      let cur = wall[i] as number
+      if (cur + dayOffset < prev - 12 * 60 * 60 * 1000) {
+        dayOffset += dayMs
+      }
+      cur += dayOffset
+      unfolded.push(cur)
+      prev = cur
+    }
+    const base = unfolded[0]!
+    return {
+      samples: rows.map((r, i) => ({
+        x: unfolded[i]! - base,
+        y: r.pathLoss,
+      })),
+      axisMode: 'elapsed_ms',
+    }
+  }
+  return {
+    samples: rows.map((r, i) => ({
+      x: i,
+      y: r.pathLoss,
+    })),
+    axisMode: 'index',
+  }
+}
+
+function drawRssiGraph(): void {
+  if (!rssiGraphCanvas) return
+  const cw = Math.max(320, Math.round(rssiGraphCanvas.clientWidth || 0))
+  const ch = Math.max(220, Math.round(rssiGraphCanvas.clientHeight || 0))
+  const dpr = window.devicePixelRatio || 1
+  rssiGraphCanvas.width = Math.round(cw * dpr)
+  rssiGraphCanvas.height = Math.round(ch * dpr)
+  const ctx = rssiGraphCanvas.getContext('2d')
+  if (!ctx) return
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, cw, ch)
+  ctx.fillStyle = '#0f1c19'
+  ctx.fillRect(0, 0, cw, ch)
+
+  const csv = processRssiCsvText.trim()
+  if (!csv) {
+    rssiGraphStatus.textContent = 'Load an RSSI CSV in Process to graph it here.'
+    return
+  }
+  const parsed = getFilteredRssiRowsFromText(csv)
+  const rows = parsed.rows
+  if (!rows.length) {
+    rssiGraphStatus.textContent =
+      'No RSSI rows parsed. Expected `time` and `rssi` columns, or first two columns as time + dBm.'
+    return
+  }
+  const built = buildRssiGraphSamples(rows)
+  const samples = built.samples
+  if (!samples.length) {
+    rssiGraphStatus.textContent = 'No graphable RSSI samples found.'
+    return
+  }
+  let minY = samples[0]!.y
+  let maxY = minY
+  for (const s of samples) {
+    if (s.y < minY) minY = s.y
+    if (s.y > maxY) maxY = s.y
+  }
+  const rawMinY = minY
+  const rawMaxY = maxY
+  const yPad = Math.max(2, (maxY - minY) * 0.08)
+  minY -= yPad
+  maxY += yPad
+  if (Math.abs(maxY - minY) < 1e-6) {
+    minY -= 1
+    maxY += 1
+  }
+  const minX = samples[0]!.x
+  const maxX = samples[samples.length - 1]!.x
+  const dx = Math.max(1e-6, maxX - minX)
+  const left = 56
+  const right = 14
+  const top = 14
+  const bottom = 34
+  const pw = Math.max(20, cw - left - right)
+  const ph = Math.max(20, ch - top - bottom)
+  const xAt = (x: number) => left + ((x - minX) / dx) * pw
+  const yAt = (y: number) => top + ((maxY - y) / (maxY - minY)) * ph
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'
+  ctx.lineWidth = 1
+  for (let i = 0; i <= 4; i++) {
+    const y = top + (ph * i) / 4
+    ctx.beginPath()
+    ctx.moveTo(left, y)
+    ctx.lineTo(left + pw, y)
+    ctx.stroke()
+  }
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'
+  ctx.beginPath()
+  ctx.moveTo(left, top)
+  ctx.lineTo(left, top + ph)
+  ctx.lineTo(left + pw, top + ph)
+  ctx.stroke()
+
+  ctx.font = '12px system-ui, Segoe UI, sans-serif'
+  ctx.fillStyle = 'rgba(224,237,233,0.9)'
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  for (let i = 0; i <= 4; i++) {
+    const t = i / 4
+    const v = maxY + (minY - maxY) * t
+    ctx.fillText(`${v.toFixed(1)}`, left - 8, top + ph * t)
+  }
+
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'top'
+  for (let i = 0; i <= 4; i++) {
+    const t = i / 4
+    const xv = minX + dx * t
+    const label = built.axisMode === 'elapsed_ms' ? formatMsAsClockLike(xv) : String(Math.round(xv))
+    ctx.fillText(label, left + pw * t, top + ph + 8)
+  }
+
+  ctx.strokeStyle = '#4df0c4'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i]!
+    const px = xAt(s.x)
+    const py = yAt(s.y)
+    if (i === 0) ctx.moveTo(px, py)
+    else ctx.lineTo(px, py)
+  }
+  ctx.stroke()
+
+  const axisNote = built.axisMode === 'elapsed_ms' ? 'x-axis: elapsed time' : 'x-axis: sample index'
+  const filterNote = parsed.filtered ? `${parsed.detail} (from ${parsed.rawCount} raw)` : 'raw'
+  rssiGraphStatus.textContent = `Parsed ${samples.length} samples (${rows[0]!.time} -> ${rows[rows.length - 1]!.time}), RSSI ${rawMinY.toFixed(1)} to ${rawMaxY.toFixed(1)} dBm, ${axisNote}, ${filterNote}.`
+}
+
+function setTab(which: 'map' | 'controls' | 'process' | 'rssi_graph'): void {
+  currentTab = which
   const mapActive = which === 'map'
   const controlsActive = which === 'controls'
   const processActive = which === 'process'
+  const rssiGraphActive = which === 'rssi_graph'
   tabMap.setAttribute('aria-selected', String(mapActive))
   tabControls.setAttribute('aria-selected', String(controlsActive))
   tabProcess.setAttribute('aria-selected', String(processActive))
+  tabRssiGraph.setAttribute('aria-selected', String(rssiGraphActive))
   tabMap.tabIndex = mapActive ? 0 : -1
   tabControls.tabIndex = controlsActive ? 0 : -1
   tabProcess.tabIndex = processActive ? 0 : -1
+  tabRssiGraph.tabIndex = rssiGraphActive ? 0 : -1
   panelMap.hidden = !mapActive
   panelControls.hidden = !controlsActive
   panelProcess.hidden = !processActive
+  panelRssiGraph.hidden = !rssiGraphActive
   redraw()
   if (processActive) {
     applyProcessViewTransform()
     syncProcessOverlayCanvas()
     drawProcessOverlay()
+  } else if (rssiGraphActive) {
+    drawRssiGraph()
   }
 }
 
@@ -3909,6 +4411,7 @@ window.addEventListener('resize', () => {
   redraw()
   syncProcessOverlayCanvas()
   drawProcessOverlay()
+  if (currentTab === 'rssi_graph') drawRssiGraph()
 })
 
 function formatRecentPlanWhen(ms: number): string {
@@ -4049,6 +4552,7 @@ stage.addEventListener('drop', (e) => {
 tabMap.addEventListener('click', () => setTab('map'))
 tabControls.addEventListener('click', () => setTab('controls'))
 tabProcess.addEventListener('click', () => setTab('process'))
+tabRssiGraph.addEventListener('click', () => setTab('rssi_graph'))
 
 processFilePlan.addEventListener('change', () => {
   processBundleSummaryOverride = null
@@ -4174,7 +4678,43 @@ processFileRssi.addEventListener('change', () => {
     const f = processFileRssi.files?.[0]
     processRssiCsvText = f ? await readFileAsText(f) : ''
     updateProcessFileSummary()
+    if (currentTab === 'rssi_graph') drawRssiGraph()
   })()
+})
+rssiGraphRollingEnable.addEventListener('change', () => {
+  processRssiRollingEnabled = rssiGraphRollingEnable.checked
+  if (processRssiRollingEnabled) processRssiLeeEnabled = false
+  syncRssiGraphFilterControls()
+  if (currentTab === 'rssi_graph') drawRssiGraph()
+  maybeAutoReplotAfterRssiFilterChange()
+})
+rssiGraphRollingWindowInput.addEventListener('change', () => {
+  processRssiRollingWindow = clampRssiRollingWindow(Number(rssiGraphRollingWindowInput.value))
+  syncRssiGraphFilterControls()
+  if (currentTab === 'rssi_graph') drawRssiGraph()
+  maybeAutoReplotAfterRssiFilterChange()
+})
+rssiGraphLeeEnable.addEventListener('change', () => {
+  processRssiLeeEnabled = rssiGraphLeeEnable.checked
+  if (processRssiLeeEnabled) processRssiRollingEnabled = false
+  syncRssiGraphFilterControls()
+  if (currentTab === 'rssi_graph') drawRssiGraph()
+  maybeAutoReplotAfterRssiFilterChange()
+})
+rssiGraphLeeFreqInput.addEventListener('change', () => {
+  processRssiLeeFreqMhz = clampRssiLeeFreqMhz(Number(rssiGraphLeeFreqInput.value))
+  syncRssiGraphFilterControls()
+  if (currentTab === 'rssi_graph') drawRssiGraph()
+  if (processRssiLeeEnabled) maybeAutoReplotAfterRssiFilterChange()
+})
+rssiGraphLeeSpeedInput.addEventListener('change', () => {
+  processRssiLeeSpeedMps = clampRssiLeeSpeedMps(Number(rssiGraphLeeSpeedInput.value))
+  syncRssiGraphFilterControls()
+  if (currentTab === 'rssi_graph') drawRssiGraph()
+  if (processRssiLeeEnabled) maybeAutoReplotAfterRssiFilterChange()
+})
+rssiGraphSaveFilteredBtn.addEventListener('click', () => {
+  downloadFilteredRssiCsv()
 })
 
 processBtnSaveBundle.addEventListener('click', () => {
@@ -4310,6 +4850,7 @@ loadProcessRssiOffsetFromStorage()
 syncProcessRssiOffsetInput()
 loadProcessHeatmapFromStorage()
 syncProcessHeatmapControls()
+syncRssiGraphFilterControls()
 processShiftXInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftYInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftReset.addEventListener('click', () => {
@@ -4558,23 +5099,9 @@ function onProcessStagePointerDown(e: PointerEvent): void {
   if (e.pointerType === 'mouse' && e.button === 1) {
     e.preventDefault()
   }
-  if (processHeatmapDrawBoundary && e.button === 0 && !e.altKey) {
-    const t = e.target as Node
-    const onOverlayCanvas = t === processCanvas || processCanvas.contains(t)
-    if (!onOverlayCanvas) {
-      const px = clientToProcessBasePixel(e.clientX, e.clientY)
-      if (px && !processHeatmapBoundaryClosed) {
-        processHeatmapBoundaryPoints.push(px)
-        if (processHeatmapBoundaryPoints.length >= 3) {
-          processHeatmapUseBoundary = processHeatmapUseBoundaryInput.checked
-        }
-        syncProcessHeatmapControls()
-        saveProcessHeatmapToStorage()
-        drawProcessOverlay()
-      }
-      e.preventDefault()
-      return
-    }
+  if (handleBoundaryPointerDown(e)) {
+    e.stopPropagation()
+    return
   }
   processPointerPositions.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY })
   if (processPointerPositions.size >= 2) {
