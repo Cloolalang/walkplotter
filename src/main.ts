@@ -8,9 +8,12 @@ import {
 } from './fspl'
 import {
   base64ToBlob,
+  parseProcessConfigJson,
   parseProcessBundleJson,
   uint8ArrayToBase64,
+  PROCESS_CONFIG_VERSION,
   PROCESS_BUNDLE_VERSION,
+  type ProcessConfigV1,
   type ProcessBundleV1,
   type ProcessBundleSettingsV1,
 } from './processBundle'
@@ -33,13 +36,6 @@ import type {
   UnmatchedTrailPoint,
   WalkplotterTrailRow,
 } from './processMerge'
-import {
-  listRecentFloorPlansMeta,
-  loadRecentFloorPlanBlob,
-  rememberFloorPlanFile,
-  removeRecentFloorPlan,
-  touchRecentFloorPlan,
-} from './recentFloorPlans'
 import { buildPoiOnlyCsv, formatDurationMsAsHMS, formatLocalTimeHMS, TrailModel } from './trail'
 import type { ImageMeta } from './trail'
 import type { PoiMarker, TrailPoint } from './types'
@@ -83,8 +79,12 @@ type ProcessPlotMetric = 'path_loss' | 'rssi'
 let processPlotMetric: ProcessPlotMetric = 'rssi'
 /** When set, file summary labels come from a loaded bundle until the user picks new files. */
 let processBundleSummaryOverride: { plan: string; walk: string; pl: string; rssi: string } | null = null
-/** Process map loaded from recents has no File object; keep a display name for the summary row. */
-let processRecentMapNameOverride: string | null = null
+/** Current loaded data-bundle filename (if loaded via Load data bundle). */
+let loadedProcessDataBundleFilename: string | null = null
+/** Current loaded process-config filename (if loaded via Load process config). */
+let loadedProcessConfigFilename: string | null = null
+/** Baseline signature captured when the current config file was loaded/applied. */
+let loadedProcessConfigBaselineSig: string | null = null
 /** Loaded bundle settings are applied after Process map image layout is ready. */
 let pendingBundleSettings: ProcessBundleSettingsV1 | null = null
 /** Walkplotter trail loaded in Process tab; x/y edits are saved via Save Walkplotter CSV. */
@@ -384,7 +384,6 @@ function applyMapFloorPlanBlob(blob: Blob, fileName: string): void {
 
 function setImageFromFile(file: File | null): void {
   if (!file || !file.type.startsWith('image/')) return
-  void rememberFloorPlanFile(file).then(() => refreshRecentFloorPlansUi())
   applyMapFloorPlanBlob(file, file.name || 'unknown')
 }
 
@@ -653,10 +652,6 @@ app.innerHTML = `
         Crosshairs
       </label>
     </header>
-    <div class="recent-floor-plans" id="recent-floor-plans-wrap" hidden>
-      <span class="recent-floor-plans-label">Recent maps</span>
-      <ul class="recent-floor-plans-list" id="recent-floor-plans-list" aria-label="Recently opened maps"></ul>
-    </div>
     <div class="interp-bar" id="interp-bar">
       <label class="interp-label" for="interp-step">Interpolation step (seconds)</label>
       <input
@@ -706,8 +701,7 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--process" id="panel-process" role="tabpanel" aria-labelledby="tab-process" hidden>
     <p class="hint process-hint">
-      Load the <strong>map</strong> and <strong>Walkplotter CSV</strong>. Optionally <strong>nudge</strong> trail dots and <strong>save</strong> the CSV so pixel columns match your plan. Then load <strong>path loss</strong> CSV (4th field = path loss in <strong>dB</strong>) and/or <strong>RSSI</strong> CSV (columns <code>time</code>, <code>rssi</code> in <strong>dBm</strong>) and tap <strong>Plot overlay</strong>. Nearest-time match within
-      ${DEFAULT_MAX_MATCH_MS / 1000}s using <code>test_date_local</code>. After plotting, use <strong>Save process bundle</strong> to name and download one JSON file with map, walk, path loss and/or RSSI, plus Process view/settings; <strong>Load bundle</strong> restores them with a single file pick (large maps make a large file).
+      Start by loading a <strong>data bundle</strong> or new data files, then either configure the Process UI manually or load a saved <strong>process config</strong> to apply those settings against the loaded data.
     </p>
     <div class="process-toolbar">
       <label class="btn btn-primary process-file-btn process-file-pick">
@@ -726,23 +720,30 @@ app.innerHTML = `
         RSSI CSV
         <input id="process-file-rssi" type="file" class="process-file-input-overlay" />
       </label>
-      <label class="process-metric-wrap" id="process-metric-wrap" hidden>
-        <span class="process-metric-label">Show</span>
-        <select id="process-plot-metric" class="process-metric-select" aria-label="Overlay metric">
-          <option value="path_loss">Path loss</option>
-          <option value="rssi">RSSI</option>
-        </select>
+      <label class="btn process-file-btn process-file-pick" title="Load a JSON data bundle from Save data bundle">
+        Load data bundle
+        <input id="process-file-bundle" type="file" class="process-file-input-overlay" />
+      </label>
+      <button type="button" class="btn" id="process-btn-save-bundle" disabled title="Download one JSON file with map + Walkplotter CSV + path loss and/or RSSI CSV">
+        Save data bundle
+      </button>
+      <button type="button" class="btn" id="process-btn-save-config" title="Download Process settings only (no map/CSV data)">
+        Save process config
+      </button>
+      <label class="btn process-file-btn process-file-pick" title="Load Process settings JSON and apply to the current data">
+        Load process config
+        <input id="process-file-config" type="file" class="process-file-input-overlay" />
       </label>
       <button type="button" class="btn btn-primary process-btn-run" id="process-btn-plot" title="Merge path loss and/or RSSI logs with the trail and draw">Plot overlay</button>
       <button type="button" class="btn" id="process-btn-clear-plot" disabled title="Remove path loss / RSSI overlay">
         Clear overlay
       </button>
-      <button type="button" class="btn" id="process-btn-save-bundle" disabled title="Download one JSON file with map + Walkplotter CSV + path loss and/or RSSI CSV">
-        Save process bundle
-      </button>
-      <label class="btn process-file-btn process-file-pick" title="Load a JSON bundle from Save process bundle">
-        Load bundle
-        <input id="process-file-bundle" type="file" class="process-file-input-overlay" />
+      <label class="process-metric-wrap" id="process-metric-wrap" hidden>
+        <span class="process-metric-label">Show</span>
+        <select id="process-plot-metric" class="process-metric-select" aria-label="Overlay metric">
+          <option value="rssi">RSSI</option>
+          <option value="path_loss">Path loss</option>
+        </select>
       </label>
       <label class="toolbar-toggle process-toolbar-toggle" title="Show path loss (dB) next to each point">
         <input type="checkbox" id="process-show-pl-labels" />
@@ -756,6 +757,27 @@ app.innerHTML = `
         <input type="checkbox" id="process-show-pl-colored-trail" />
         Color-coded trail
       </label>
+      <div class="process-toolbar process-toolbar--rssi-adjust" id="process-rssi-adjust-wrap" hidden>
+        <span
+          class="process-shift-lead"
+          title="Adds this offset to every plotted RSSI sample (dB) before FSPL scaling is applied."
+          >RSSI offset</span
+        >
+        <label class="process-shift-field" for="process-rssi-offset"
+          ><span class="process-shift-label">ΔRSSI dB</span>
+          <input
+            type="number"
+            id="process-rssi-offset"
+            class="process-shift-input"
+            step="0.5"
+            value="0"
+            inputmode="decimal"
+          />
+        </label>
+        <button type="button" class="btn" id="process-rssi-offset-reset" title="Set RSSI offset to 0 dB">
+          Reset RSSI offset
+        </button>
+      </div>
     </div>
     <div class="process-toolbar process-toolbar--fspl" id="process-fspl-wrap" hidden>
       <label class="toolbar-toggle process-toolbar-toggle process-fspl-toggle" title="Free-space frequency scaling. Positive PL (dB): add 20·log₁₀(f_est/f_meas). Negative PL values (some gear): correction is sign-flipped so lower frequency still shows less loss.">
@@ -773,27 +795,6 @@ app.innerHTML = `
         <span class="process-fspl-unit">MHz</span></label
       >
       <span class="process-fspl-delta" id="process-fspl-delta" aria-live="polite"></span>
-    </div>
-    <div class="process-toolbar process-toolbar--rssi-adjust" id="process-rssi-adjust-wrap" hidden>
-      <span
-        class="process-shift-lead"
-        title="Adds this offset to every plotted RSSI sample (dB) before FSPL scaling is applied."
-        >RSSI offset</span
-      >
-      <label class="process-shift-field" for="process-rssi-offset"
-        ><span class="process-shift-label">ΔRSSI dB</span>
-        <input
-          type="number"
-          id="process-rssi-offset"
-          class="process-shift-input"
-          step="0.5"
-          value="0"
-          inputmode="decimal"
-        />
-      </label>
-      <button type="button" class="btn" id="process-rssi-offset-reset" title="Set RSSI offset to 0 dB">
-        Reset RSSI offset
-      </button>
     </div>
     <div class="process-toolbar process-toolbar--heatmap" id="process-heatmap-wrap" hidden>
       <label class="toolbar-toggle process-toolbar-toggle" title="Distance-weighted heatmap based on nearby plotted sample values">
@@ -900,10 +901,6 @@ app.innerHTML = `
         Reset orientation
       </button>
     </div>
-    <div class="recent-floor-plans" id="process-recent-floor-plans-wrap" hidden>
-      <span class="recent-floor-plans-label">Recent maps</span>
-      <ul class="recent-floor-plans-list" id="process-recent-floor-plans-list" aria-label="Recently opened maps for Process"></ul>
-    </div>
     <div class="process-files-summary" id="process-files-summary" aria-live="polite">
       <div class="process-file-row">
         <span class="process-file-kind">Map</span>
@@ -920,6 +917,14 @@ app.innerHTML = `
       <div class="process-file-row">
         <span class="process-file-kind">RSSI CSV</span>
         <span class="process-file-name" id="process-filename-rssi">—</span>
+      </div>
+      <div class="process-file-row">
+        <span class="process-file-kind">Data bundle</span>
+        <span class="process-file-name" id="process-filename-data-bundle">—</span>
+      </div>
+      <div class="process-file-row">
+        <span class="process-file-kind">Process config</span>
+        <span class="process-file-name" id="process-filename-config">—</span>
       </div>
     </div>
     <div class="map-zoom-bar process-zoom-bar" id="process-zoom-bar" hidden>
@@ -1125,9 +1130,9 @@ app.innerHTML = `
   </dialog>
   <dialog class="save-dialog" id="bundle-save-dialog">
     <form id="bundle-save-form">
-      <h2 class="save-dialog-title">Save process bundle</h2>
+      <h2 class="save-dialog-title">Save data bundle</h2>
       <p class="save-dialog-desc">
-        Choose a file name for the JSON bundle (map + Walkplotter CSV + path loss and/or RSSI CSV + Process view/settings).
+        Choose a file name for the JSON data bundle (map + Walkplotter CSV + path loss and/or RSSI CSV). Use Save process config for settings-only snapshots.
         <code>.json</code> is added if missing.
       </p>
       <label class="save-dialog-label">
@@ -1152,10 +1157,6 @@ app.innerHTML = `
 const img = document.querySelector<HTMLImageElement>('#plan')!
 const canvas = document.querySelector<HTMLCanvasElement>('#overlay')!
 const fileInput = document.querySelector<HTMLInputElement>('#file')!
-const recentFloorPlansWrap = document.querySelector<HTMLDivElement>('#recent-floor-plans-wrap')!
-const recentFloorPlansList = document.querySelector<HTMLUListElement>('#recent-floor-plans-list')!
-const processRecentFloorPlansWrap = document.querySelector<HTMLDivElement>('#process-recent-floor-plans-wrap')!
-const processRecentFloorPlansList = document.querySelector<HTMLUListElement>('#process-recent-floor-plans-list')!
 const btnPause = document.querySelector<HTMLButtonElement>('#btn-pause')!
 const btnStop = document.querySelector<HTMLButtonElement>('#btn-stop')!
 const btnDownload = document.querySelector<HTMLButtonElement>('#btn-download')!
@@ -1221,6 +1222,8 @@ const processBtnPlot = document.querySelector<HTMLButtonElement>('#process-btn-p
 const processBtnClearPlot = document.querySelector<HTMLButtonElement>('#process-btn-clear-plot')!
 const processBtnSaveBundle = document.querySelector<HTMLButtonElement>('#process-btn-save-bundle')!
 const processFileBundle = document.querySelector<HTMLInputElement>('#process-file-bundle')!
+const processBtnSaveConfig = document.querySelector<HTMLButtonElement>('#process-btn-save-config')!
+const processFileConfig = document.querySelector<HTMLInputElement>('#process-file-config')!
 const processShowPlLabels = document.querySelector<HTMLInputElement>('#process-show-pl-labels')!
 const processShowPlRoute = document.querySelector<HTMLInputElement>('#process-show-pl-route')!
 const processShowPlColoredTrail = document.querySelector<HTMLInputElement>('#process-show-pl-colored-trail')!
@@ -1258,6 +1261,8 @@ const processFilenamePlan = document.querySelector<HTMLSpanElement>('#process-fi
 const processFilenameWalk = document.querySelector<HTMLSpanElement>('#process-filename-walk')!
 const processFilenamePl = document.querySelector<HTMLSpanElement>('#process-filename-pl')!
 const processFilenameRssi = document.querySelector<HTMLSpanElement>('#process-filename-rssi')!
+const processFilenameDataBundle = document.querySelector<HTMLSpanElement>('#process-filename-data-bundle')!
+const processFilenameConfig = document.querySelector<HTMLSpanElement>('#process-filename-config')!
 const processMetricWrap = document.querySelector<HTMLLabelElement>('#process-metric-wrap')!
 const processPlotMetricSelect = document.querySelector<HTMLSelectElement>('#process-plot-metric')!
 const processLegend = document.querySelector<HTMLDivElement>('#process-legend')!
@@ -2218,12 +2223,44 @@ function updateProcessBundleButtons(): void {
   processBtnSaveBundle.disabled = !(hasPlan && hasTrail && (hasPl || hasRssi))
 }
 
+function buildCurrentProcessConfigComparableSig(): string {
+  const rssiFilterMode: 'raw' | 'rolling' | 'lee' = processRssiLeeEnabled
+    ? 'lee'
+    : processRssiRollingEnabled
+      ? 'rolling'
+      : 'raw'
+  return JSON.stringify({
+    settings: collectCurrentProcessBundleSettings(),
+    rssiFilter: {
+      mode: rssiFilterMode,
+      rollingWindow: processRssiRollingWindow,
+      leeFreqMhz: processRssiLeeFreqMhz,
+      leeSpeedMps: processRssiLeeSpeedMps,
+    },
+    paletteSaturation: processPaletteSaturation,
+    pathLossStops: plColorStops.map((s) => ({ db: s.db, rgb: [s.rgb[0], s.rgb[1], s.rgb[2]] })),
+  })
+}
+
+function processConfigSummaryLabel(): string {
+  if (!loadedProcessConfigFilename) return '—'
+  if (!loadedProcessConfigBaselineSig) return loadedProcessConfigFilename
+  const dirty = buildCurrentProcessConfigComparableSig() !== loadedProcessConfigBaselineSig
+  return dirty ? `${loadedProcessConfigFilename} (modified)` : loadedProcessConfigFilename
+}
+
+function updateProcessBundleConfigSummaryLabels(): void {
+  processFilenameDataBundle.textContent = loadedProcessDataBundleFilename ?? '—'
+  processFilenameConfig.textContent = processConfigSummaryLabel()
+}
+
 function updateProcessFileSummary(): void {
   if (processBundleSummaryOverride) {
     processFilenamePlan.textContent = processBundleSummaryOverride.plan
     processFilenameWalk.textContent = processBundleSummaryOverride.walk
     processFilenamePl.textContent = processBundleSummaryOverride.pl
     processFilenameRssi.textContent = processBundleSummaryOverride.rssi
+    updateProcessBundleConfigSummaryLabels()
     updateProcessBundleButtons()
     updateRssiGraphSaveButton()
     if (currentTab === 'rssi_graph') {
@@ -2232,10 +2269,11 @@ function updateProcessFileSummary(): void {
     return
   }
   const label = (f: File | undefined) => f?.name ?? '—'
-  processFilenamePlan.textContent = processRecentMapNameOverride ?? label(processFilePlan.files?.[0])
+  processFilenamePlan.textContent = label(processFilePlan.files?.[0])
   processFilenameWalk.textContent = label(processFileWalk.files?.[0])
   processFilenamePl.textContent = label(processFilePl.files?.[0])
   processFilenameRssi.textContent = label(processFileRssi.files?.[0])
+  updateProcessBundleConfigSummaryLabels()
   updateProcessBundleButtons()
   updateRssiGraphSaveButton()
   if (currentTab === 'rssi_graph') {
@@ -2264,7 +2302,7 @@ function clearProcessTrailState(): void {
   processHeatmapUseBoundary = false
   processPlotMetric = 'rssi'
   processBundleSummaryOverride = null
-  processRecentMapNameOverride = null
+  loadedProcessDataBundleFilename = null
   pendingBundleSettings = null
   processTrailDragIndex = null
   processNudgeTrail.checked = false
@@ -2430,6 +2468,28 @@ function collectCurrentProcessBundleSettings(): ProcessBundleSettingsV1 {
   }
 }
 
+function collectCurrentProcessConfig(): ProcessConfigV1 {
+  const rssiFilterMode: 'raw' | 'rolling' | 'lee' = processRssiLeeEnabled
+    ? 'lee'
+    : processRssiRollingEnabled
+      ? 'rolling'
+      : 'raw'
+  return {
+    walkplotterProcessConfigVersion: PROCESS_CONFIG_VERSION,
+    app: 'walkplotter',
+    savedAt: new Date().toISOString(),
+    settings: collectCurrentProcessBundleSettings(),
+    rssiFilter: {
+      mode: rssiFilterMode,
+      rollingWindow: processRssiRollingWindow,
+      leeFreqMhz: processRssiLeeFreqMhz,
+      leeSpeedMps: processRssiLeeSpeedMps,
+    },
+    paletteSaturation: processPaletteSaturation,
+    pathLossStops: plColorStops.map((s) => ({ db: s.db, rgb: [s.rgb[0], s.rgb[1], s.rgb[2]] })),
+  }
+}
+
 function applyProcessBundleSettings(settings: ProcessBundleSettingsV1): void {
   if (settings.overlayShiftPx) {
     processOverlayShiftX = snapShiftTo10Px(settings.overlayShiftPx.x)
@@ -2507,6 +2567,62 @@ function applyProcessBundleSettings(settings: ProcessBundleSettingsV1): void {
       setSelectValueIfExists(processFsplTarget, String(Math.round(settings.fspl.estimateMhz)))
     }
     updateProcessFsplDeltaLabel()
+  }
+}
+
+function applyProcessConfig(config: ProcessConfigV1): void {
+  applyProcessBundleSettings(config.settings)
+
+  if (config.rssiFilter) {
+    processRssiRollingWindow = clampRssiRollingWindow(
+      Number(config.rssiFilter.rollingWindow ?? processRssiRollingWindow)
+    )
+    processRssiLeeFreqMhz = clampRssiLeeFreqMhz(
+      Number(config.rssiFilter.leeFreqMhz ?? processRssiLeeFreqMhz)
+    )
+    processRssiLeeSpeedMps = clampRssiLeeSpeedMps(
+      Number(config.rssiFilter.leeSpeedMps ?? processRssiLeeSpeedMps)
+    )
+    if (config.rssiFilter.mode === 'lee') {
+      processRssiLeeEnabled = true
+      processRssiRollingEnabled = false
+    } else if (config.rssiFilter.mode === 'rolling') {
+      processRssiRollingEnabled = true
+      processRssiLeeEnabled = false
+    } else {
+      processRssiRollingEnabled = false
+      processRssiLeeEnabled = false
+    }
+    syncRssiGraphFilterControls()
+  }
+
+  if (typeof config.paletteSaturation === 'number' && Number.isFinite(config.paletteSaturation)) {
+    processPaletteSaturation = Math.max(0, Math.min(2, config.paletteSaturation))
+    syncProcessDotSizeControl()
+    saveProcessPaletteSaturationToStorage()
+  }
+
+  if (
+    Array.isArray(config.pathLossStops) &&
+    config.pathLossStops.length === plColorStops.length &&
+    config.pathLossStops.every((stop, i) => stop.db === plColorStops[i]!.db)
+  ) {
+    plColorStops = config.pathLossStops.map((s) => ({
+      db: s.db,
+      rgb: [s.rgb[0], s.rgb[1], s.rgb[2]],
+    }))
+    savePlStopsToStorage()
+    buildProcessPlStopsEditor()
+  }
+
+  const hasMap = Boolean(processImg.naturalWidth)
+  const hasTrail = processTrailEditable.length > 0
+  const hasOverlayInput = processPathLossCsvText.trim().length > 0 || processRssiCsvText.trim().length > 0
+  if (hasMap && hasTrail && hasOverlayInput) {
+    runProcessPlot()
+  } else {
+    rebuildProcessMergedFromFspl()
+    drawProcessOverlay()
   }
 }
 
@@ -3186,6 +3302,7 @@ function drawDistanceWeightedHeatmap(
 }
 
 function drawProcessOverlay(): void {
+  updateProcessBundleConfigSummaryLabels()
   const ctx = processCanvas.getContext('2d')
   if (!ctx || !processImg.naturalWidth) {
     if (processLegend) processLegend.hidden = true
@@ -3504,6 +3621,20 @@ function safeBundleDownloadFilename(raw: string): string {
   return s.slice(0, 200)
 }
 
+function safeConfigDownloadFilename(raw: string): string {
+  let s = raw.trim().replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, ' ').replace(/^\.+/, '')
+  if (!s) s = 'walkplotter-process-config'
+  if (!s.toLowerCase().endsWith('.json')) s += '.json'
+  return s.slice(0, 200)
+}
+
+function saveProcessConfig(downloadFilename: string): void {
+  const config = collectCurrentProcessConfig()
+  const json = JSON.stringify(config)
+  downloadJsonFile(downloadFilename, json)
+  processStatus.textContent = `Saved "${downloadFilename}" (~${(json.length / 1024).toFixed(0)} KB). Load process config to reapply these settings on another dataset.`
+}
+
 /** Build and download bundle; `downloadFilename` should already be sanitized (e.g. via `safeBundleDownloadFilename`). */
 async function saveProcessBundle(downloadFilename: string): Promise<boolean> {
   if (!processImg.naturalWidth || !processTrailEditable.length) return false
@@ -3542,11 +3673,10 @@ async function saveProcessBundle(downloadFilename: string): Promise<boolean> {
     walkplotterCsv: walkText.replace(/^\uFEFF/, ''),
     pathLossCsv: plText.replace(/^\uFEFF/, ''),
     ...(rssiText ? { rssiCsv: rssiText.replace(/^\uFEFF/, '') } : {}),
-    settings: collectCurrentProcessBundleSettings(),
   }
   const json = JSON.stringify(bundle)
   downloadJsonFile(downloadFilename, json)
-  processStatus.textContent = `Saved "${downloadFilename}" (~${(json.length / 1024).toFixed(0)} KB). Use Load bundle to restore.`
+  processStatus.textContent = `Saved "${downloadFilename}" (~${(json.length / 1024).toFixed(0)} KB). Use Load data bundle to restore.`
   return true
 }
 
@@ -3564,12 +3694,11 @@ async function applyProcessBundle(bundle: ProcessBundleV1): Promise<void> {
   processRssiMergedPointsRaw = []
   processRssiUnmatchedTrailPoints = []
   processPlotMetric = 'rssi'
-  processRecentMapNameOverride = null
   processFilePlan.value = ''
   processFileWalk.value = ''
   processFilePl.value = ''
   processFileRssi.value = ''
-  pendingBundleSettings = bundle.settings ?? null
+  pendingBundleSettings = null
   processNudgeTrail.checked = false
   processTrailDragIndex = null
   processFsplEnable.checked = false
@@ -3592,14 +3721,13 @@ async function applyProcessBundle(bundle: ProcessBundleV1): Promise<void> {
   processWalkTestDate = extractWalkplotterTestDate(bundle.walkplotterCsv)
 
   processBundleSummaryOverride = {
-    plan: bundle.floorPlan.fileName,
-    walk: '(from bundle)',
-    pl: bundle.pathLossCsv.trim().length > 0 ? '(from bundle)' : '—',
-    rssi: bundle.rssiCsv?.trim().length ? '(from bundle)' : '—',
+    plan: '(from data bundle)',
+    walk: '(from data bundle)',
+    pl: bundle.pathLossCsv.trim().length > 0 ? '(from data bundle)' : '—',
+    rssi: bundle.rssiCsv?.trim().length ? '(from data bundle)' : '—',
   }
   updateProcessFileSummary()
-  const settingsMsg = bundle.settings ? ' View/settings restored.' : ''
-  processStatus.textContent = `Loaded process bundle (saved ${bundle.savedAt.slice(0, 19)}). Tap Plot overlay to redraw.${settingsMsg}`
+  processStatus.textContent = `Loaded data bundle (saved ${bundle.savedAt.slice(0, 19)}). Tap Plot overlay to redraw.`
   drawProcessOverlay()
 }
 
@@ -3633,7 +3761,7 @@ function runProcessPlot(): void {
   }
   if (!wantPl && !wantRssi) {
     processStatus.textContent =
-      'Choose a path loss CSV and/or an RSSI CSV (`time` + `rssi`), or load a process bundle with path loss and/or RSSI.'
+      'Choose a path loss CSV and/or an RSSI CSV (`time` + `rssi`), or load a data bundle with path loss and/or RSSI.'
     return
   }
   void (async () => {
@@ -4071,6 +4199,7 @@ function syncRssiGraphFilterControls(): void {
   } else {
     rssiGraphFilterNote.textContent = 'Raw RSSI values (no filter).'
   }
+  updateProcessBundleConfigSummaryLabels()
   updateRssiGraphSaveButton()
 }
 
@@ -4477,120 +4606,6 @@ window.addEventListener('resize', () => {
   if (currentTab === 'rssi_graph') drawRssiGraph()
 })
 
-function formatRecentPlanWhen(ms: number): string {
-  try {
-    return new Date(ms).toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return ''
-  }
-}
-
-async function refreshRecentFloorPlansUi(): Promise<void> {
-  const meta = await listRecentFloorPlansMeta()
-  recentFloorPlansList.replaceChildren()
-  processRecentFloorPlansList.replaceChildren()
-  if (meta.length === 0) {
-    recentFloorPlansWrap.hidden = true
-    processRecentFloorPlansWrap.hidden = true
-    return
-  }
-  recentFloorPlansWrap.hidden = false
-  processRecentFloorPlansWrap.hidden = false
-  for (const m of meta) {
-    const li = document.createElement('li')
-    li.className = 'recent-floor-plans-item'
-    const pick = document.createElement('button')
-    pick.type = 'button'
-    pick.className = 'btn recent-floor-plans-pick'
-    const shortName = m.fileName.length > 36 ? `${m.fileName.slice(0, 34)}…` : m.fileName
-    pick.textContent = shortName
-    pick.title = `${m.fileName}\nOpened: ${formatRecentPlanWhen(m.savedAt)}`
-    pick.addEventListener('click', () => void pickRecentFloorPlan(m.key))
-    const rm = document.createElement('button')
-    rm.type = 'button'
-    rm.className = 'btn recent-floor-plans-remove'
-    rm.setAttribute('aria-label', `Remove ${m.fileName} from recent maps`)
-    rm.title = 'Remove from list'
-    rm.textContent = '×'
-    rm.addEventListener('click', (e) => {
-      e.stopPropagation()
-      void removeRecentFloorPlan(m.key).then(() => refreshRecentFloorPlansUi())
-    })
-    li.appendChild(pick)
-    li.appendChild(rm)
-    recentFloorPlansList.appendChild(li)
-
-    const liProcess = document.createElement('li')
-    liProcess.className = 'recent-floor-plans-item'
-    const pickProcess = document.createElement('button')
-    pickProcess.type = 'button'
-    pickProcess.className = 'btn recent-floor-plans-pick'
-    pickProcess.textContent = shortName
-    pickProcess.title = `${m.fileName}\nOpened: ${formatRecentPlanWhen(m.savedAt)}`
-    pickProcess.addEventListener('click', () => void pickRecentFloorPlanForProcess(m.key))
-    const rmProcess = document.createElement('button')
-    rmProcess.type = 'button'
-    rmProcess.className = 'btn recent-floor-plans-remove'
-    rmProcess.setAttribute('aria-label', `Remove ${m.fileName} from recent maps`)
-    rmProcess.title = 'Remove from list'
-    rmProcess.textContent = '×'
-    rmProcess.addEventListener('click', (e) => {
-      e.stopPropagation()
-      void removeRecentFloorPlan(m.key).then(() => refreshRecentFloorPlansUi())
-    })
-    liProcess.appendChild(pickProcess)
-    liProcess.appendChild(rmProcess)
-    processRecentFloorPlansList.appendChild(liProcess)
-  }
-}
-
-async function pickRecentFloorPlan(key: string): Promise<void> {
-  const got = await loadRecentFloorPlanBlob(key)
-  if (!got) {
-    await refreshRecentFloorPlansUi()
-    return
-  }
-  await touchRecentFloorPlan(key)
-  applyMapFloorPlanBlob(got.blob, got.fileName)
-  await refreshRecentFloorPlansUi()
-  updateChrome()
-}
-
-function applyProcessMapBlob(blob: Blob, fileName: string): void {
-  if (!blob.type.startsWith('image/')) return
-  processBundleSummaryOverride = null
-  if (processPlanObjectUrl) {
-    URL.revokeObjectURL(processPlanObjectUrl)
-    processPlanObjectUrl = null
-  }
-  clearProcessTrailState()
-  processRecentMapNameOverride = fileName || 'unknown'
-  processFilePlan.value = ''
-  processFileWalk.value = ''
-  processFilePl.value = ''
-  processFileRssi.value = ''
-  processPlanObjectUrl = URL.createObjectURL(blob)
-  processImg.src = processPlanObjectUrl
-  processStatus.textContent = 'Loaded recent map. Choose Walkplotter CSV to continue.'
-  updateProcessFileSummary()
-}
-
-async function pickRecentFloorPlanForProcess(key: string): Promise<void> {
-  const got = await loadRecentFloorPlanBlob(key)
-  if (!got) {
-    await refreshRecentFloorPlansUi()
-    return
-  }
-  await touchRecentFloorPlan(key)
-  applyProcessMapBlob(got.blob, got.fileName)
-  await refreshRecentFloorPlansUi()
-}
-
 fileInput.addEventListener('change', () => {
   const f = fileInput.files?.[0] ?? null
   setImageFromFile(f)
@@ -4619,7 +4634,6 @@ tabRssiGraph.addEventListener('click', () => setTab('rssi_graph'))
 
 processFilePlan.addEventListener('change', () => {
   processBundleSummaryOverride = null
-  processRecentMapNameOverride = null
   const f = processFilePlan.files?.[0]
   if (processPlanObjectUrl) {
     URL.revokeObjectURL(processPlanObjectUrl)
@@ -4644,7 +4658,6 @@ processFilePlan.addEventListener('change', () => {
     updateProcessFileSummary()
     return
   }
-  void rememberFloorPlanFile(f).then(() => refreshRecentFloorPlansUi())
   processPlanObjectUrl = URL.createObjectURL(f)
   processImg.src = processPlanObjectUrl
   updateProcessFileSummary()
@@ -4653,6 +4666,7 @@ processFilePlan.addEventListener('change', () => {
 processFileWalk.addEventListener('change', () => {
   void (async () => {
     processBundleSummaryOverride = null
+    loadedProcessDataBundleFilename = null
     updateProcessFileSummary()
     processMergedPoints = []
     processMergedPointsRaw = []
@@ -4730,6 +4744,7 @@ processFileWalk.addEventListener('change', () => {
 processFilePl.addEventListener('change', () => {
   void (async () => {
     processBundleSummaryOverride = null
+    loadedProcessDataBundleFilename = null
     const f = processFilePl.files?.[0]
     processPathLossCsvText = f ? await readFileAsText(f) : ''
     updateProcessFileSummary()
@@ -4739,6 +4754,7 @@ processFilePl.addEventListener('change', () => {
 processFileRssi.addEventListener('change', () => {
   void (async () => {
     processBundleSummaryOverride = null
+    loadedProcessDataBundleFilename = null
     const f = processFileRssi.files?.[0]
     processRssiCsvText = f ? await readFileAsText(f) : ''
     updateProcessFileSummary()
@@ -4792,6 +4808,12 @@ processBtnSaveBundle.addEventListener('click', () => {
   })
 })
 
+processBtnSaveConfig.addEventListener('click', () => {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+  const name = safeConfigDownloadFilename(`walkplotter-process-config-${stamp}`)
+  saveProcessConfig(name)
+})
+
 bundleSaveCancel.addEventListener('click', () => {
   bundleSaveDialog.close()
 })
@@ -4815,12 +4837,38 @@ processFileBundle.addEventListener('change', () => {
       const bundle = parseProcessBundleJson(text)
       if (!bundle) {
         processStatus.textContent =
-          'Not a valid Walkplotter process bundle (expected version 1 JSON from Save process bundle).'
+          'Not a valid Walkplotter data bundle (expected version 1 JSON from Save data bundle).'
         return
       }
       await applyProcessBundle(bundle)
+      loadedProcessDataBundleFilename = f.name
+      updateProcessFileSummary()
     } catch (e) {
       processStatus.textContent = `Bundle load error: ${e instanceof Error ? e.message : String(e)}`
+    }
+  })()
+})
+
+processFileConfig.addEventListener('change', () => {
+  void (async () => {
+    const f = processFileConfig.files?.[0]
+    processFileConfig.value = ''
+    if (!f) return
+    try {
+      const text = await readFileAsText(f)
+      const config = parseProcessConfigJson(text)
+      if (!config) {
+        processStatus.textContent =
+          'Not a valid Walkplotter process config (expected version 1 JSON from Save process config).'
+        return
+      }
+      applyProcessConfig(config)
+      loadedProcessConfigFilename = f.name
+      loadedProcessConfigBaselineSig = buildCurrentProcessConfigComparableSig()
+      updateProcessFileSummary()
+      processStatus.textContent = `Applied process config (saved ${config.savedAt.slice(0, 19)}).`
+    } catch (e) {
+      processStatus.textContent = `Config load error: ${e instanceof Error ? e.message : String(e)}`
     }
   })()
 })
@@ -5487,4 +5535,3 @@ fillFsplSelectOptions()
 initProcessPlColourScale()
 updateChrome()
 void loadDefaultFloorPlan()
-void refreshRecentFloorPlansUi()
