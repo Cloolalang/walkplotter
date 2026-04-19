@@ -1892,6 +1892,22 @@ function rssiToColor(rssi: number): string {
   const minDb = stops[0]!.db
   const maxDb = stops[stops.length - 1]!.db
   const x = Math.max(minDb, Math.min(maxDb, rssi))
+  // Discrete RSSI palette mapping (no interpolation): each band uses its lower-edge color.
+  for (let i = stops.length - 1; i >= 0; i--) {
+    const s = stops[i]!
+    if (x >= s.db) {
+      return rgbStringFromPalette(s.rgb[0], s.rgb[1], s.rgb[2])
+    }
+  }
+  const c = stops[0]!.rgb
+  return rgbStringFromPalette(c[0], c[1], c[2])
+}
+
+function rssiToColorInterpolated(rssi: number): string {
+  const stops = currentRssiColorStops()
+  const minDb = stops[0]!.db
+  const maxDb = stops[stops.length - 1]!.db
+  const x = Math.max(minDb, Math.min(maxDb, rssi))
   if (x <= stops[0]!.db) {
     const c = stops[0]!.rgb
     return rgbStringFromPalette(c[0], c[1], c[2])
@@ -1921,11 +1937,20 @@ function rssiScaleGradientCss(): string {
   const minDb = stops[0]!.db
   const maxDb = stops[stops.length - 1]!.db
   const den = Math.max(1e-9, maxDb - minDb)
-  const pts = stops.map((s) => ({
-    pct: ((s.db - minDb) / den) * 100,
-    color: rssiToColor(s.db),
-  })).sort((a, b) => a.pct - b.pct)
-  return `linear-gradient(90deg, ${pts.map((p) => `${p.color} ${p.pct.toFixed(2)}%`).join(', ')})`
+  const segs: string[] = []
+  for (let i = 0; i < stops.length - 1; i++) {
+    const lo = stops[i]!
+    const hi = stops[i + 1]!
+    const loPct = ((lo.db - minDb) / den) * 100
+    const hiPct = ((hi.db - minDb) / den) * 100
+    const col = rgbStringFromPalette(lo.rgb[0], lo.rgb[1], lo.rgb[2])
+    segs.push(`${col} ${loPct.toFixed(2)}%`, `${col} ${hiPct.toFixed(2)}%`)
+  }
+  const last = stops[stops.length - 1]!
+  const lastPct = ((last.db - minDb) / den) * 100
+  const lastCol = rgbStringFromPalette(last.rgb[0], last.rgb[1], last.rgb[2])
+  segs.push(`${lastCol} ${lastPct.toFixed(2)}%`, `${lastCol} 100%`)
+  return `linear-gradient(90deg, ${segs.join(', ')})`
 }
 
 function rssiBinMidColor(low: number, high: number): string {
@@ -1944,8 +1969,11 @@ function getActiveProcessUnmatched(): UnmatchedTrailPoint[] {
   return processMetricIsRssiView() ? processRssiUnmatchedTrailPoints : processUnmatchedTrailPoints
 }
 
-function metricValueToColor(v: number): string {
-  return processMetricIsRssiView() ? rssiToColor(v) : pathLossToColor(v)
+function metricValueToColor(v: number, opts?: { smoothRssi?: boolean }): string {
+  if (processMetricIsRssiView()) {
+    return opts?.smoothRssi ? rssiToColorInterpolated(v) : rssiToColor(v)
+  }
+  return pathLossToColor(v)
 }
 
 function metricScaleGradientCss(): string {
@@ -3534,7 +3562,7 @@ function drawDistanceWeightedHeatmap(
       if (!pointInPolygon(cx, cy, boundaryOverlay)) continue
     }
     const v = valSum[i]! / ws
-    const rgb = parseRgbLike(metricValueToColor(v))
+    const rgb = parseRgbLike(metricValueToColor(v, { smoothRssi: true }))
     if (!rgb) continue
     const density = Math.min(1, Math.sqrt(ws) * 1.25)
     const a = Math.round(255 * baseAlpha * density)
