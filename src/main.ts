@@ -124,6 +124,9 @@ let processPaletteSaturation = 1
 const PROCESS_RSSI_OFFSET_STORAGE_KEY = 'walkplotter-process-rssi-offset-v1'
 /** Applies a global dB offset to all RSSI samples before FSPL scaling (what-if calibration). */
 let processRssiOffsetDb = 0
+const PROCESS_RSSI_PALETTE_STORAGE_KEY = 'walkplotter-process-rssi-palette-v1'
+type RssiPaletteName = 'legacy' | 'cividis' | 'viridis' | 'turbo' | 'jots'
+let processRssiPalette: RssiPaletteName = 'jots'
 const PROCESS_HEATMAP_STORAGE_KEY = 'walkplotter-process-heatmap-v1'
 /** Distance-weighted heatmap controls for Process metric overlay. */
 let processShowHeatmap = false
@@ -814,6 +817,16 @@ app.innerHTML = `
         <button type="button" class="btn" id="process-rssi-offset-reset" title="Set RSSI offset to 0 dB">
           Reset RSSI offset
         </button>
+        <label class="process-shift-field" for="process-rssi-palette"
+          ><span class="process-shift-label">Palette</span>
+          <select id="process-rssi-palette" class="process-fspl-select" aria-label="RSSI palette">
+            <option value="legacy">Legacy</option>
+            <option value="cividis">Cividis</option>
+            <option value="viridis">Viridis</option>
+            <option value="turbo">Turbo</option>
+            <option value="jots">JOTS</option>
+          </select>
+        </label>
       </div>
     </div>
     <div class="process-toolbar process-toolbar--fspl" id="process-fspl-wrap" hidden>
@@ -1304,6 +1317,7 @@ const processFsplDelta = document.querySelector<HTMLSpanElement>('#process-fspl-
 const processRssiAdjustWrap = document.querySelector<HTMLDivElement>('#process-rssi-adjust-wrap')!
 const processRssiOffsetInput = document.querySelector<HTMLInputElement>('#process-rssi-offset')!
 const processRssiOffsetReset = document.querySelector<HTMLButtonElement>('#process-rssi-offset-reset')!
+const processRssiPaletteSelect = document.querySelector<HTMLSelectElement>('#process-rssi-palette')!
 const processHeatmapWrap = document.querySelector<HTMLDivElement>('#process-heatmap-wrap')!
 const processShowHeatmapInput = document.querySelector<HTMLInputElement>('#process-show-heatmap')!
 const processHeatmapUseBoundaryInput = document.querySelector<HTMLInputElement>('#process-heatmap-use-boundary')!
@@ -1801,23 +1815,85 @@ const PROCESS_RSSI_GOOD = -25
 const PROCESS_RSSI_BAD = -120
 
 /** One stop every 10 dBm from weak (−120) to strong (−25); map and histogram use the same scale. */
-const RSSI_COLOR_STOPS: readonly { db: number; rgb: readonly [number, number, number] }[] = [
-  { db: -120, rgb: [8, 8, 10] },
-  { db: -110, rgb: [34, 12, 16] },
-  { db: -100, rgb: [72, 20, 24] },
-  { db: -90, rgb: [198, 44, 32] },
-  { db: -80, rgb: [255, 130, 36] },
-  { db: -70, rgb: [255, 215, 52] },
-  { db: -60, rgb: [108, 198, 68] },
-  { db: -50, rgb: [52, 136, 214] },
-  { db: -40, rgb: [64, 138, 230] },
-  { db: -30, rgb: [168, 208, 255] },
-  { db: -25, rgb: [255, 255, 255] },
-]
+const RSSI_PALETTES: Record<RssiPaletteName, readonly { db: number; rgb: readonly [number, number, number] }[]> = {
+  legacy: [
+    { db: -120, rgb: [8, 8, 10] },
+    { db: -110, rgb: [34, 12, 16] },
+    { db: -100, rgb: [72, 20, 24] },
+    { db: -90, rgb: [198, 44, 32] },
+    { db: -80, rgb: [255, 130, 36] },
+    { db: -70, rgb: [255, 215, 52] },
+    { db: -60, rgb: [108, 198, 68] },
+    { db: -50, rgb: [52, 136, 214] },
+    { db: -40, rgb: [64, 138, 230] },
+    { db: -30, rgb: [168, 208, 255] },
+    { db: -25, rgb: [255, 255, 255] },
+  ],
+  cividis: [
+    { db: -120, rgb: [0, 34, 77] },
+    { db: -110, rgb: [12, 45, 95] },
+    { db: -100, rgb: [28, 57, 112] },
+    { db: -90, rgb: [43, 70, 122] },
+    { db: -80, rgb: [62, 84, 128] },
+    { db: -70, rgb: [85, 99, 129] },
+    { db: -60, rgb: [112, 114, 125] },
+    { db: -50, rgb: [140, 130, 118] },
+    { db: -40, rgb: [171, 147, 106] },
+    { db: -30, rgb: [203, 165, 90] },
+    { db: -25, rgb: [234, 186, 71] },
+  ],
+  viridis: [
+    { db: -120, rgb: [68, 1, 84] },
+    { db: -110, rgb: [72, 27, 109] },
+    { db: -100, rgb: [67, 55, 128] },
+    { db: -90, rgb: [58, 82, 139] },
+    { db: -80, rgb: [48, 103, 141] },
+    { db: -70, rgb: [40, 124, 142] },
+    { db: -60, rgb: [32, 144, 140] },
+    { db: -50, rgb: [52, 163, 115] },
+    { db: -40, rgb: [94, 201, 98] },
+    { db: -30, rgb: [170, 220, 50] },
+    { db: -25, rgb: [253, 231, 37] },
+  ],
+  turbo: [
+    { db: -120, rgb: [48, 18, 59] },
+    { db: -110, rgb: [65, 47, 128] },
+    { db: -100, rgb: [60, 83, 196] },
+    { db: -90, rgb: [43, 122, 224] },
+    { db: -80, rgb: [29, 156, 193] },
+    { db: -70, rgb: [58, 183, 125] },
+    { db: -60, rgb: [121, 203, 66] },
+    { db: -50, rgb: [190, 214, 49] },
+    { db: -40, rgb: [241, 204, 65] },
+    { db: -30, rgb: [252, 165, 53] },
+    { db: -25, rgb: [227, 86, 42] },
+  ],
+  jots: [
+    { db: -120, rgb: [48, 48, 48] },
+    { db: -110, rgb: [255, 0, 0] },
+    { db: -100, rgb: [255, 153, 0] },
+    { db: -90, rgb: [255, 255, 0] },
+    { db: -80, rgb: [0, 153, 0] },
+    { db: -70, rgb: [0, 255, 0] },
+    { db: -60, rgb: [0, 75, 224] },
+    { db: -50, rgb: [0, 255, 255] },
+    { db: -40, rgb: [176, 255, 255] },
+    { db: -30, rgb: [255, 255, 255] },
+    { db: -25, rgb: [255, 255, 255] },
+  ],
+}
+
+function clampRssiPaletteName(v: unknown): RssiPaletteName {
+  return v === 'cividis' || v === 'viridis' || v === 'turbo' || v === 'jots' ? v : 'legacy'
+}
+
+function currentRssiColorStops(): readonly { db: number; rgb: readonly [number, number, number] }[] {
+  return RSSI_PALETTES[processRssiPalette]
+}
 
 function rssiToColor(rssi: number): string {
   const x = Math.max(PROCESS_RSSI_BAD, Math.min(PROCESS_RSSI_GOOD, rssi))
-  const stops = RSSI_COLOR_STOPS
+  const stops = currentRssiColorStops()
   if (x <= stops[0]!.db) {
     const c = stops[0]!.rgb
     return rgbStringFromPalette(c[0], c[1], c[2])
@@ -1843,7 +1919,7 @@ function rssiToColor(rssi: number): string {
 }
 
 function rssiScaleGradientCss(): string {
-  const pts = RSSI_COLOR_STOPS.map((s) => ({
+  const pts = currentRssiColorStops().map((s) => ({
     pct: ((s.db - PROCESS_RSSI_GOOD) / (PROCESS_RSSI_BAD - PROCESS_RSSI_GOOD)) * 100,
     color: rssiToColor(s.db),
   })).sort((a, b) => a.pct - b.pct)
@@ -2298,6 +2374,7 @@ function updateProcessFsplChrome(): void {
   processRssiAdjustWrap.hidden = !hasRssi
   processRssiOffsetInput.disabled = !hasRssi
   processRssiOffsetReset.disabled = !hasRssi
+  processRssiPaletteSelect.disabled = !hasRssi
   processHeatmapWrap.hidden = !hasMetricOverlay
   processShowHeatmapInput.disabled = !hasMetricOverlay
   processHeatmapUseBoundaryInput.disabled = !hasMetricOverlay
@@ -2548,6 +2625,13 @@ function collectCurrentProcessBundleSettings(): ProcessBundleSettingsV1 {
     },
     dotScale: processDotScale,
     rssiOffsetDb: processRssiOffsetDb,
+    rssiPalette: processRssiPalette,
+    rssiHistogramThresholds: {
+      minDb: processRssiThresholdMinDb,
+      minPct: processRssiThresholdMinPct,
+      maxDb: processRssiThresholdMaxDb,
+      maxPct: processRssiThresholdMaxPct,
+    },
     heatmap: {
       enabled: processShowHeatmap,
       useBoundary: processHeatmapUseBoundary,
@@ -2616,6 +2700,38 @@ function applyProcessBundleSettings(settings: ProcessBundleSettingsV1): void {
     processRssiOffsetDb = settings.rssiOffsetDb
     syncProcessRssiOffsetInput()
     saveProcessRssiOffsetToStorage()
+  }
+  if (settings.rssiPalette) {
+    processRssiPalette = clampRssiPaletteName(settings.rssiPalette)
+    syncProcessRssiPaletteControl()
+    saveProcessRssiPaletteToStorage()
+  }
+  if (settings.rssiHistogramThresholds) {
+    if (typeof settings.rssiHistogramThresholds.minDb === 'number') {
+      processRssiThresholdMinDb = clampRssiThresholdDb(
+        settings.rssiHistogramThresholds.minDb,
+        processRssiThresholdMinDb,
+      )
+    }
+    if (typeof settings.rssiHistogramThresholds.minPct === 'number') {
+      processRssiThresholdMinPct = clampRssiThresholdPct(
+        settings.rssiHistogramThresholds.minPct,
+        processRssiThresholdMinPct,
+      )
+    }
+    if (typeof settings.rssiHistogramThresholds.maxDb === 'number') {
+      processRssiThresholdMaxDb = clampRssiThresholdDb(
+        settings.rssiHistogramThresholds.maxDb,
+        processRssiThresholdMaxDb,
+      )
+    }
+    if (typeof settings.rssiHistogramThresholds.maxPct === 'number') {
+      processRssiThresholdMaxPct = clampRssiThresholdPct(
+        settings.rssiHistogramThresholds.maxPct,
+        processRssiThresholdMaxPct,
+      )
+    }
+    syncRssiHistogramThresholdInputs()
   }
   if (settings.heatmap) {
     if (typeof settings.heatmap.enabled === 'boolean') {
@@ -2796,6 +2912,33 @@ function saveProcessRssiOffsetToStorage(): void {
   } catch {
     /* ignore */
   }
+}
+
+function loadProcessRssiPaletteFromStorage(): void {
+  processRssiPalette = 'jots'
+  try {
+    const raw = localStorage.getItem(PROCESS_RSSI_PALETTE_STORAGE_KEY)
+    if (!raw) return
+    const o = JSON.parse(raw) as { palette?: unknown }
+    processRssiPalette = clampRssiPaletteName(o.palette)
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveProcessRssiPaletteToStorage(): void {
+  try {
+    localStorage.setItem(
+      PROCESS_RSSI_PALETTE_STORAGE_KEY,
+      JSON.stringify({ palette: processRssiPalette }),
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncProcessRssiPaletteControl(): void {
+  processRssiPaletteSelect.value = processRssiPalette
 }
 
 function syncProcessRssiOffsetInput(): void {
@@ -5254,6 +5397,8 @@ loadProcessPaletteSaturationFromStorage()
 syncProcessDotSizeControl()
 loadProcessRssiOffsetFromStorage()
 syncProcessRssiOffsetInput()
+loadProcessRssiPaletteFromStorage()
+syncProcessRssiPaletteControl()
 loadProcessHeatmapFromStorage()
 syncProcessHeatmapControls()
 syncRssiGraphFilterControls()
@@ -5284,6 +5429,12 @@ processRssiOffsetReset.addEventListener('click', () => {
   syncProcessRssiOffsetInput()
   saveProcessRssiOffsetToStorage()
   rebuildProcessMergedFromFspl()
+  drawProcessOverlay()
+})
+processRssiPaletteSelect.addEventListener('change', () => {
+  processRssiPalette = clampRssiPaletteName(processRssiPaletteSelect.value)
+  syncProcessRssiPaletteControl()
+  saveProcessRssiPaletteToStorage()
   drawProcessOverlay()
 })
 processShowHeatmapInput.addEventListener('change', () => {

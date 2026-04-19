@@ -11,6 +11,13 @@ export type ProcessBundleSettingsV1 = {
   flip?: { x: boolean; y: boolean }
   dotScale?: number
   rssiOffsetDb?: number
+  rssiPalette?: 'legacy' | 'cividis' | 'viridis' | 'turbo' | 'jots'
+  rssiHistogramThresholds?: {
+    minDb?: number
+    minPct?: number
+    maxDb?: number
+    maxPct?: number
+  }
   heatmap?: {
     enabled?: boolean
     useBoundary?: boolean
@@ -107,6 +114,43 @@ function parseProcessBundleSettings(raw: unknown): ProcessBundleSettingsV1 | nul
     const rssiOffsetDb = asFiniteNumberOrUndefined(s.rssiOffsetDb)
     if (rssiOffsetDb == null) return null
     out.rssiOffsetDb = rssiOffsetDb
+  }
+  if (s.rssiPalette != null) {
+    if (
+      s.rssiPalette !== 'legacy' &&
+      s.rssiPalette !== 'cividis' &&
+      s.rssiPalette !== 'viridis' &&
+      s.rssiPalette !== 'turbo' &&
+      s.rssiPalette !== 'jots'
+    ) {
+      return null
+    }
+    out.rssiPalette = s.rssiPalette
+  }
+  if (s.rssiHistogramThresholds != null) {
+    if (!isRecord(s.rssiHistogramThresholds)) return null
+    const t: NonNullable<ProcessBundleSettingsV1['rssiHistogramThresholds']> = {}
+    if (s.rssiHistogramThresholds.minDb != null) {
+      const minDb = asFiniteNumberOrUndefined(s.rssiHistogramThresholds.minDb)
+      if (minDb == null) return null
+      t.minDb = minDb
+    }
+    if (s.rssiHistogramThresholds.minPct != null) {
+      const minPct = asFiniteNumberOrUndefined(s.rssiHistogramThresholds.minPct)
+      if (minPct == null) return null
+      t.minPct = minPct
+    }
+    if (s.rssiHistogramThresholds.maxDb != null) {
+      const maxDb = asFiniteNumberOrUndefined(s.rssiHistogramThresholds.maxDb)
+      if (maxDb == null) return null
+      t.maxDb = maxDb
+    }
+    if (s.rssiHistogramThresholds.maxPct != null) {
+      const maxPct = asFiniteNumberOrUndefined(s.rssiHistogramThresholds.maxPct)
+      if (maxPct == null) return null
+      t.maxPct = maxPct
+    }
+    out.rssiHistogramThresholds = t
   }
   if (s.heatmap != null) {
     if (!isRecord(s.heatmap)) return null
