@@ -37,6 +37,8 @@ export type ProcessRssiFilterConfigV1 = {
   rollingWindow?: number
   leeFreqMhz?: number
   leeSpeedMps?: number
+  /** Optional post-filter resample rate in Hz (0 = off). */
+  resampleHz?: number
 }
 
 export type ProcessConfigV1 = {
@@ -280,6 +282,11 @@ export function parseProcessConfigJson(text: string): ProcessConfigV1 | null {
       const leeSpeedMps = asFiniteNumberOrUndefined(o.rssiFilter.leeSpeedMps)
       if (leeSpeedMps == null) return null
       rssiFilter.leeSpeedMps = leeSpeedMps
+    }
+    if (o.rssiFilter.resampleHz != null) {
+      const resampleHz = asFiniteNumberOrUndefined(o.rssiFilter.resampleHz)
+      if (resampleHz == null) return null
+      rssiFilter.resampleHz = resampleHz
     }
   }
 

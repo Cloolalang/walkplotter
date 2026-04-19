@@ -100,6 +100,7 @@ let processRssiRollingWindow = 5
 let processRssiLeeEnabled = false
 let processRssiLeeFreqMhz = 2640
 let processRssiLeeSpeedMps = 1.4
+let processRssiResampleHz: 0 | 1 | 2 = 0
 let processRssiThresholdMinDb = -90
 let processRssiThresholdMinPct = 95
 let processRssiThresholdMaxDb = -25
@@ -660,7 +661,7 @@ app.innerHTML = `
 
   <div class="tab-panel tab-panel--controls" id="panel-controls" role="tabpanel" aria-labelledby="tab-controls" hidden>
     <div class="controls-title-bar" role="banner">
-      <span class="controls-title-text">Walkplotter - version 2.6 April 2026</span>
+      <span class="controls-title-text">Walkplotter - version 2.7 April 2026</span>
       <a
         class="controls-title-link"
         href="https://github.com/Cloolalang/walkplotter#readme"
@@ -1131,6 +1132,14 @@ app.innerHTML = `
           inputmode="decimal"
         />
       </label>
+      <label class="rssi-graph-field" for="rssi-graph-resample-hz"
+        ><span>Resample</span>
+        <select id="rssi-graph-resample-hz">
+          <option value="0">Off (raw rate)</option>
+          <option value="2">2 Hz</option>
+          <option value="1">1 Hz</option>
+        </select>
+      </label>
       <span class="rssi-graph-note" id="rssi-graph-filter-note">Raw RSSI values (no filter).</span>
     </div>
     <p class="hint rssi-graph-status" id="rssi-graph-status">Load an RSSI CSV in Process to graph it here.</p>
@@ -1258,6 +1267,7 @@ const rssiGraphSaveFilteredBtn = document.querySelector<HTMLButtonElement>('#rss
 const rssiGraphLeeEnable = document.querySelector<HTMLInputElement>('#rssi-graph-lee-enable')!
 const rssiGraphLeeFreqInput = document.querySelector<HTMLInputElement>('#rssi-graph-lee-freq')!
 const rssiGraphLeeSpeedInput = document.querySelector<HTMLInputElement>('#rssi-graph-lee-speed')!
+const rssiGraphResampleHzSelect = document.querySelector<HTMLSelectElement>('#rssi-graph-resample-hz')!
 const rssiGraphFilterNote = document.querySelector<HTMLSpanElement>('#rssi-graph-filter-note')!
 const processImg = document.querySelector<HTMLImageElement>('#process-plan')!
 const processCanvas = document.querySelector<HTMLCanvasElement>('#process-overlay')!
@@ -2130,8 +2140,10 @@ function updateProcessHistogramTable(): void {
     : processRssiRollingEnabled
       ? `filtered data = rolling average<${processRssiRollingWindow}>`
       : 'Raw data'
+  const rssiResampleSuffix =
+    processRssiResampleHz > 0 ? `; resampled to ${processRssiResampleHz} Hz` : ''
   processHistogramTitle.textContent = rssiView
-    ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm) (sample rate decimated to 1/second) ${rssiDataSuffix}`
+    ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm) ${rssiDataSuffix}${rssiResampleSuffix}`
     : `Path loss histogram (${PROCESS_HIST_BIN_WIDTH_DB} dB bins, down to −120 dB)`
   const totalSeconds = rows.reduce((sum, row) => sum + row.seconds, 0)
   processHistogramMeta.textContent = rssiView
@@ -2325,6 +2337,7 @@ function buildCurrentProcessConfigComparableSig(): string {
       rollingWindow: processRssiRollingWindow,
       leeFreqMhz: processRssiLeeFreqMhz,
       leeSpeedMps: processRssiLeeSpeedMps,
+      resampleHz: processRssiResampleHz,
     },
     paletteSaturation: processPaletteSaturation,
     pathLossStops: plColorStops.map((s) => ({ db: s.db, rgb: [s.rgb[0], s.rgb[1], s.rgb[2]] })),
@@ -2573,6 +2586,7 @@ function collectCurrentProcessConfig(): ProcessConfigV1 {
       rollingWindow: processRssiRollingWindow,
       leeFreqMhz: processRssiLeeFreqMhz,
       leeSpeedMps: processRssiLeeSpeedMps,
+      resampleHz: processRssiResampleHz,
     },
     paletteSaturation: processPaletteSaturation,
     pathLossStops: plColorStops.map((s) => ({ db: s.db, rgb: [s.rgb[0], s.rgb[1], s.rgb[2]] })),
@@ -2671,6 +2685,9 @@ function applyProcessConfig(config: ProcessConfigV1): void {
     )
     processRssiLeeSpeedMps = clampRssiLeeSpeedMps(
       Number(config.rssiFilter.leeSpeedMps ?? processRssiLeeSpeedMps)
+    )
+    processRssiResampleHz = clampRssiResampleHz(
+      Number(config.rssiFilter.resampleHz ?? processRssiResampleHz)
     )
     if (config.rssiFilter.mode === 'lee') {
       processRssiLeeEnabled = true
@@ -4118,6 +4135,13 @@ function clampRssiLeeSpeedMps(v: number): number {
   return Math.max(0.05, Math.min(5, Number.isFinite(v) ? v : 1.4))
 }
 
+function clampRssiResampleHz(v: number): 0 | 1 | 2 {
+  const n = Number.isFinite(v) ? Math.round(v) : 0
+  if (n === 1) return 1
+  if (n === 2) return 2
+  return 0
+}
+
 function clampRssiThresholdDb(v: number, fallback: number): number {
   const n = Number.isFinite(v) ? v : fallback
   return Math.max(-200, Math.min(50, n))
@@ -4208,11 +4232,12 @@ function hasRssiCsvLoaded(): boolean {
 }
 
 function updateRssiGraphSaveButton(): void {
-  const canSave = (processRssiRollingEnabled || processRssiLeeEnabled) && hasRssiCsvLoaded()
+  const hasProcessing = processRssiRollingEnabled || processRssiLeeEnabled || processRssiResampleHz > 0
+  const canSave = hasProcessing && hasRssiCsvLoaded()
   rssiGraphSaveFilteredBtn.disabled = !canSave
   rssiGraphSaveFilteredBtn.title = canSave
-    ? 'Download the rolling-average filtered RSSI CSV (time,rssi) for re-load/bundle workflows'
-    : 'Enable rolling average and load an RSSI CSV to save filtered output'
+    ? 'Download processed RSSI CSV (time,rssi) for re-load/bundle workflows'
+    : 'Enable RSSI filtering or resampling and load an RSSI CSV to save processed output'
 }
 
 function maybeAutoReplotAfterRssiFilterChange(): void {
@@ -4247,14 +4272,96 @@ function buildFilteredRssiCsvText(rows: PathLossRow[]): string {
   return `${lines.join('\r\n')}\r\n`
 }
 
+function stdDevAllSamples(rows: PathLossRow[]): number {
+  if (!rows.length) return 0
+  let sum = 0
+  for (const r of rows) sum += r.pathLoss
+  const mean = sum / rows.length
+  let varSum = 0
+  for (const r of rows) {
+    const d = r.pathLoss - mean
+    varSum += d * d
+  }
+  // Population standard deviation across all samples currently considered.
+  return Math.sqrt(varSum / rows.length)
+}
+
+function buildRssiTimelineMs(rows: PathLossRow[]): number[] | null {
+  if (!rows.length) return []
+  if (rows.every((r) => typeof r.absoluteTimeMs === 'number' && Number.isFinite(r.absoluteTimeMs))) {
+    return rows.map((r) => r.absoluteTimeMs as number)
+  }
+  const dur = rows.map((r) => parseDurationHmsToMs(r.time))
+  if (dur.every((v) => v != null)) {
+    return dur.map((v) => v as number)
+  }
+  const wall = rows.map((r) => parseWallClockToMsOfDay(r.time))
+  if (wall.every((v) => v != null)) {
+    const dayMs = 24 * 60 * 60 * 1000
+    let dayOffset = 0
+    let prev = wall[0] as number
+    const unfolded: number[] = [prev]
+    for (let i = 1; i < wall.length; i++) {
+      let cur = wall[i] as number
+      if (cur + dayOffset < prev - 12 * 60 * 60 * 1000) dayOffset += dayMs
+      cur += dayOffset
+      unfolded.push(cur)
+      prev = cur
+    }
+    return unfolded
+  }
+  return null
+}
+
+function resampleRssiRows(rows: PathLossRow[], targetHz: 0 | 1 | 2): PathLossRow[] {
+  if (!rows.length || targetHz <= 0) return rows.map((r) => ({ ...r }))
+  const timelineMs = buildRssiTimelineMs(rows)
+  if (!timelineMs || timelineMs.length !== rows.length) return rows.map((r) => ({ ...r }))
+  const bucketMs = 1000 / targetHz
+  const t0 = timelineMs[0]!
+  const out: PathLossRow[] = []
+  let i = 0
+  while (i < rows.length) {
+    const relMs = Math.max(0, timelineMs[i]! - t0)
+    const bucketIdx = Math.floor(relMs / bucketMs)
+    const bucketEnd = (bucketIdx + 1) * bucketMs
+    let sum = 0
+    let cnt = 0
+    let absSum = 0
+    let absCnt = 0
+    const first = rows[i]!
+    while (i < rows.length) {
+      const rel = Math.max(0, timelineMs[i]! - t0)
+      if (rel >= bucketEnd) break
+      const row = rows[i]!
+      sum += row.pathLoss
+      cnt++
+      if (typeof row.absoluteTimeMs === 'number' && Number.isFinite(row.absoluteTimeMs)) {
+        absSum += row.absoluteTimeMs
+        absCnt++
+      }
+      i++
+    }
+    if (cnt > 0) {
+      const next: PathLossRow = { time: first.time, pathLoss: sum / cnt }
+      if (absCnt > 0) next.absoluteTimeMs = absSum / absCnt
+      out.push(next)
+    } else {
+      i++
+    }
+  }
+  return out
+}
+
 function downloadFilteredRssiCsv(): void {
   const csv = processRssiCsvText.trim()
   if (!csv) {
     rssiGraphStatus.textContent = 'Load an RSSI CSV first.'
     return
   }
-  if (!processRssiRollingEnabled && !processRssiLeeEnabled) {
-    rssiGraphStatus.textContent = 'Enable rolling average or Lee criterion first, then save filtered RSSI CSV.'
+  if (!processRssiRollingEnabled && !processRssiLeeEnabled && processRssiResampleHz <= 0) {
+    rssiGraphStatus.textContent =
+      'Enable rolling average, Lee criterion, or resampling first, then save processed RSSI CSV.'
     return
   }
   const parsed = getFilteredRssiRowsFromText(csv)
@@ -4272,39 +4379,73 @@ function downloadFilteredRssiCsv(): void {
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
-  rssiGraphStatus.textContent = `Saved filtered RSSI CSV: ${filename} (${parsed.rows.length} rows, ${parsed.detail}).`
+  rssiGraphStatus.textContent = `Saved processed RSSI CSV: ${filename} (${parsed.rows.length} rows, ${parsed.detail}).`
 }
 
 function getFilteredRssiRowsFromText(text: string): {
   rows: PathLossRow[]
   rawCount: number
+  postFilterCount: number
+  postResampleCount: number
+  rawStdDev: number
+  outputStdDev: number
   filtered: boolean
   mode: 'raw' | 'rolling' | 'lee'
+  resampleHz: 0 | 1 | 2
   detail: string
 } {
   const rawRows = parseRssiCsv(text)
-  if (!rawRows.length) return { rows: [], rawCount: 0, filtered: false, mode: 'raw', detail: 'raw' }
-  if (processRssiLeeEnabled) {
-    const win = estimateLeeWindowSamples(rawRows)
-    const filteredRows = applyRssiRollingAverage(rawRows, win)
+  if (!rawRows.length) {
     return {
-      rows: filteredRows,
-      rawCount: rawRows.length,
-      filtered: true,
-      mode: 'lee',
-      detail: `Lee criterion (f=${clampRssiLeeFreqMhz(processRssiLeeFreqMhz).toFixed(0)} MHz, v=${clampRssiLeeSpeedMps(processRssiLeeSpeedMps).toFixed(2)} m/s, window ${win})`,
+      rows: [],
+      rawCount: 0,
+      postFilterCount: 0,
+      postResampleCount: 0,
+      rawStdDev: 0,
+      outputStdDev: 0,
+      filtered: false,
+      mode: 'raw',
+      resampleHz: processRssiResampleHz,
+      detail: 'raw',
     }
   }
-  if (!processRssiRollingEnabled) {
-    return { rows: rawRows, rawCount: rawRows.length, filtered: false, mode: 'raw', detail: 'raw' }
+  let filteredRows: PathLossRow[] = rawRows
+  let filtered = false
+  let mode: 'raw' | 'rolling' | 'lee' = 'raw'
+  let detail = 'raw'
+  if (processRssiLeeEnabled) {
+    const win = estimateLeeWindowSamples(rawRows)
+    filteredRows = applyRssiRollingAverage(rawRows, win)
+    filtered = true
+    mode = 'lee'
+    detail = `Lee criterion (f=${clampRssiLeeFreqMhz(processRssiLeeFreqMhz).toFixed(0)} MHz, v=${clampRssiLeeSpeedMps(processRssiLeeSpeedMps).toFixed(2)} m/s, window ${win})`
+  } else if (processRssiRollingEnabled) {
+    filteredRows = applyRssiRollingAverage(rawRows, processRssiRollingWindow)
+    filtered = true
+    mode = 'rolling'
+    detail = `rolling average window ${processRssiRollingWindow}`
   }
-  const filteredRows = applyRssiRollingAverage(rawRows, processRssiRollingWindow)
+  const postFilterCount = filteredRows.length
+  const resampleHz = clampRssiResampleHz(processRssiResampleHz)
+  const rows = resampleHz > 0 ? resampleRssiRows(filteredRows, resampleHz) : filteredRows
+  const postResampleCount = rows.length
+  const rawStdDev = stdDevAllSamples(rawRows)
+  const outputStdDev = stdDevAllSamples(rows)
+  if (resampleHz > 0) {
+    const resamplePart = `resampled to ${resampleHz} Hz`
+    detail = filtered ? `${detail}; ${resamplePart}` : resamplePart
+  }
   return {
-    rows: filteredRows,
+    rows,
     rawCount: rawRows.length,
-    filtered: true,
-    mode: 'rolling',
-    detail: `rolling average window ${processRssiRollingWindow}`,
+    postFilterCount,
+    postResampleCount,
+    rawStdDev,
+    outputStdDev,
+    filtered,
+    mode,
+    resampleHz,
+    detail,
   }
 }
 
@@ -4314,17 +4455,22 @@ function syncRssiGraphFilterControls(): void {
   rssiGraphRollingWindowInput.value = String(processRssiRollingWindow)
   rssiGraphLeeFreqInput.value = String(clampRssiLeeFreqMhz(processRssiLeeFreqMhz))
   rssiGraphLeeSpeedInput.value = String(clampRssiLeeSpeedMps(processRssiLeeSpeedMps))
+  rssiGraphResampleHzSelect.value = String(clampRssiResampleHz(processRssiResampleHz))
   rssiGraphRollingWindowInput.disabled = !processRssiRollingEnabled || processRssiLeeEnabled
   rssiGraphLeeFreqInput.disabled = !processRssiLeeEnabled
   rssiGraphLeeSpeedInput.disabled = !processRssiLeeEnabled
+  const resampleNote =
+    processRssiResampleHz > 0 ? ` Resample: ${processRssiResampleHz} Hz (shows raw -> output sample counts).` : ''
   if (processRssiLeeEnabled) {
     rssiGraphFilterNote.textContent =
-      `Lee criterion enabled (f=${clampRssiLeeFreqMhz(processRssiLeeFreqMhz).toFixed(0)} MHz, v=${clampRssiLeeSpeedMps(processRssiLeeSpeedMps).toFixed(2)} m/s). Used by RSSI graph and Plot overlay.`
+      `Lee criterion enabled (f=${clampRssiLeeFreqMhz(processRssiLeeFreqMhz).toFixed(0)} MHz, v=${clampRssiLeeSpeedMps(processRssiLeeSpeedMps).toFixed(2)} m/s). Used by RSSI graph and Plot overlay.${resampleNote}`
   } else if (processRssiRollingEnabled) {
     rssiGraphFilterNote.textContent =
-      `Rolling average enabled (window ${processRssiRollingWindow} samples). Used by RSSI graph and Plot overlay.`
+      `Rolling average enabled (window ${processRssiRollingWindow} samples). Used by RSSI graph and Plot overlay.${resampleNote}`
   } else {
-    rssiGraphFilterNote.textContent = 'Raw RSSI values (no filter).'
+    rssiGraphFilterNote.textContent = processRssiResampleHz > 0
+      ? `Raw RSSI values with resample to ${processRssiResampleHz} Hz. Used by RSSI graph and Plot overlay.`
+      : 'Raw RSSI values (no filter).'
   }
   updateProcessBundleConfigSummaryLabels()
   updateRssiGraphSaveButton()
@@ -4496,8 +4642,13 @@ function drawRssiGraph(): void {
   ctx.stroke()
 
   const axisNote = built.axisMode === 'elapsed_ms' ? 'x-axis: elapsed time' : 'x-axis: sample index'
-  const filterNote = parsed.filtered ? `${parsed.detail} (from ${parsed.rawCount} raw)` : 'raw'
-  rssiGraphStatus.textContent = `Parsed ${samples.length} samples (${rows[0]!.time} -> ${rows[rows.length - 1]!.time}), RSSI ${rawMinY.toFixed(1)} to ${rawMaxY.toFixed(1)} dBm, ${axisNote}, ${filterNote}.`
+  const countNote =
+    parsed.postFilterCount !== parsed.postResampleCount
+      ? `samples raw ${parsed.rawCount.toLocaleString()} -> filtered ${parsed.postFilterCount.toLocaleString()} -> output ${parsed.postResampleCount.toLocaleString()}`
+      : `samples raw ${parsed.rawCount.toLocaleString()} -> output ${parsed.postResampleCount.toLocaleString()}`
+  const stdDevNote = `std dev σ raw ${parsed.rawStdDev.toFixed(2)} dB -> output ${parsed.outputStdDev.toFixed(2)} dB`
+  rssiGraphStatus.textContent =
+    `Parsed ${samples.length} samples (${rows[0]!.time} -> ${rows[rows.length - 1]!.time}), RSSI ${rawMinY.toFixed(1)} to ${rawMaxY.toFixed(1)} dBm, ${axisNote}, ${parsed.detail}, ${countNote}, ${stdDevNote}.`
 }
 
 function setTab(which: 'map' | 'controls' | 'process' | 'rssi_graph'): void {
@@ -4919,6 +5070,12 @@ rssiGraphLeeSpeedInput.addEventListener('change', () => {
   syncRssiGraphFilterControls()
   if (currentTab === 'rssi_graph') drawRssiGraph()
   if (processRssiLeeEnabled) maybeAutoReplotAfterRssiFilterChange()
+})
+rssiGraphResampleHzSelect.addEventListener('change', () => {
+  processRssiResampleHz = clampRssiResampleHz(Number(rssiGraphResampleHzSelect.value))
+  syncRssiGraphFilterControls()
+  if (currentTab === 'rssi_graph') drawRssiGraph()
+  maybeAutoReplotAfterRssiFilterChange()
 })
 rssiGraphSaveFilteredBtn.addEventListener('click', () => {
   downloadFilteredRssiCsv()
