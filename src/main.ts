@@ -100,6 +100,10 @@ let processRssiRollingWindow = 5
 let processRssiLeeEnabled = false
 let processRssiLeeFreqMhz = 2640
 let processRssiLeeSpeedMps = 1.4
+let processRssiThresholdMinDb = -90
+let processRssiThresholdMinPct = 95
+let processRssiThresholdMaxDb = -25
+let processRssiThresholdMaxPct = 100
 
 const PROCESS_OVERLAY_SHIFT_STORAGE_KEY = 'walkplotter-process-overlay-shift-v1'
 /** Draw trail and RF overlay at (x + Δx, y + Δy) in intrinsic image pixels (display-only until you nudge and save). */
@@ -996,6 +1000,29 @@ app.innerHTML = `
     <div class="process-legend" id="process-legend" hidden></div>
     <div class="process-histogram-wrap" id="process-histogram-wrap" hidden>
       <p class="process-histogram-title" id="process-histogram-title">Path loss histogram (20 dB bins, down to −120 dB)</p>
+      <p class="process-histogram-meta" id="process-histogram-meta"></p>
+      <div class="process-rssi-thresholds" id="process-rssi-thresholds" hidden>
+        <p class="process-rssi-thresholds-title">RSSI threshold checks</p>
+        <div class="process-rssi-thresholds-grid">
+          <label class="rssi-graph-field process-rssi-threshold-field" for="process-rssi-threshold-min-db"
+            ><span>Minimum RSSI (dBm)</span>
+            <input type="number" id="process-rssi-threshold-min-db" min="-200" max="50" step="1" value="-90" inputmode="decimal" />
+          </label>
+          <label class="rssi-graph-field process-rssi-threshold-field" for="process-rssi-threshold-min-pct"
+            ><span>Minimum bin %</span>
+            <input type="number" id="process-rssi-threshold-min-pct" min="0" max="100" step="0.1" value="95" inputmode="decimal" />
+          </label>
+          <label class="rssi-graph-field process-rssi-threshold-field" for="process-rssi-threshold-max-db"
+            ><span>Maximum RSSI (dBm)</span>
+            <input type="number" id="process-rssi-threshold-max-db" min="-200" max="50" step="1" value="-25" inputmode="decimal" />
+          </label>
+          <label class="rssi-graph-field process-rssi-threshold-field" for="process-rssi-threshold-max-pct"
+            ><span>Maximum bin %</span>
+            <input type="number" id="process-rssi-threshold-max-pct" min="0" max="100" step="0.1" value="100" inputmode="decimal" />
+          </label>
+        </div>
+        <p class="process-rssi-threshold-results" id="process-rssi-threshold-results"></p>
+      </div>
       <details class="process-colour-scale" id="process-colour-scale">
         <summary class="process-colour-scale-summary">Bin &amp; map colour scale</summary>
         <p class="hint process-colour-scale-hint">
@@ -1300,6 +1327,13 @@ const processPlotMetricSelect = document.querySelector<HTMLSelectElement>('#proc
 const processLegend = document.querySelector<HTMLDivElement>('#process-legend')!
 const processHistogramWrap = document.querySelector<HTMLDivElement>('#process-histogram-wrap')!
 const processHistogramTitle = document.querySelector<HTMLParagraphElement>('#process-histogram-title')!
+const processHistogramMeta = document.querySelector<HTMLParagraphElement>('#process-histogram-meta')!
+const processRssiThresholds = document.querySelector<HTMLDivElement>('#process-rssi-thresholds')!
+const processRssiThresholdMinDbInput = document.querySelector<HTMLInputElement>('#process-rssi-threshold-min-db')!
+const processRssiThresholdMinPctInput = document.querySelector<HTMLInputElement>('#process-rssi-threshold-min-pct')!
+const processRssiThresholdMaxDbInput = document.querySelector<HTMLInputElement>('#process-rssi-threshold-max-db')!
+const processRssiThresholdMaxPctInput = document.querySelector<HTMLInputElement>('#process-rssi-threshold-max-pct')!
+const processRssiThresholdResults = document.querySelector<HTMLParagraphElement>('#process-rssi-threshold-results')!
 const processColourScale = document.querySelector<HTMLDetailsElement>('#process-colour-scale')!
 const processHistogramRangeTh = document.querySelector<HTMLTableCellElement>('#process-histogram-range-th')!
 const processHistogramBody = document.querySelector<HTMLTableSectionElement>('#process-histogram-body')!
@@ -2074,6 +2108,9 @@ function updateProcessHistogramTable(): void {
     processHistogramWrap.hidden = true
     processHistogramBody.innerHTML = ''
     processHistogramPie.replaceChildren()
+    processHistogramMeta.textContent = ''
+    processRssiThresholdResults.textContent = ''
+    processRssiThresholds.hidden = true
     processColourScale.hidden = false
     return
   }
@@ -2096,6 +2133,10 @@ function updateProcessHistogramTable(): void {
   processHistogramTitle.textContent = rssiView
     ? `RSSI histogram (${PROCESS_HIST_RSSI_BIN_WIDTH_DB} dBm bins, −120…−25 dBm) (sample rate decimated to 1/second) ${rssiDataSuffix}`
     : `Path loss histogram (${PROCESS_HIST_BIN_WIDTH_DB} dB bins, down to −120 dB)`
+  const totalSeconds = rows.reduce((sum, row) => sum + row.seconds, 0)
+  processHistogramMeta.textContent = rssiView
+    ? `${total.toLocaleString()} samples (post-filter) · ${totalSeconds.toFixed(1)} total seconds`
+    : `${total.toLocaleString()} samples · ${totalSeconds.toFixed(1)} total seconds`
   processHistogramRangeTh.textContent = rangeTh
   processHistogramPie.setAttribute(
     'aria-label',
@@ -2113,6 +2154,22 @@ function updateProcessHistogramTable(): void {
   }
   processHistogramBody.innerHTML = parts.join('')
   updateProcessHistogramPie(rows, total, binMid)
+  processRssiThresholds.hidden = !rssiView
+  if (rssiView) {
+    const minHitCount = merged.reduce((acc, pt) => acc + (pt.pathLoss >= processRssiThresholdMinDb ? 1 : 0), 0)
+    const maxHitCount = merged.reduce((acc, pt) => acc + (pt.pathLoss <= processRssiThresholdMaxDb ? 1 : 0), 0)
+    const minPct = total > 0 ? (100 * minHitCount) / total : 0
+    const maxPct = total > 0 ? (100 * maxHitCount) / total : 0
+    const minPass = minPct >= processRssiThresholdMinPct
+    const maxPass = maxPct >= processRssiThresholdMaxPct
+    const minStatusClass = minPass ? 'process-rssi-threshold-pass' : 'process-rssi-threshold-fail'
+    const maxStatusClass = maxPass ? 'process-rssi-threshold-pass' : 'process-rssi-threshold-fail'
+    processRssiThresholdResults.innerHTML =
+      `<span class="${minStatusClass}">MIN >= ${processRssiThresholdMinDb.toFixed(0)} dBm: ${minPct.toFixed(1)}% (target ${processRssiThresholdMinPct.toFixed(1)}%)</span>` +
+      ` · <span class="${maxStatusClass}">MAX <= ${processRssiThresholdMaxDb.toFixed(0)} dBm: ${maxPct.toFixed(1)}% (target ${processRssiThresholdMaxPct.toFixed(1)}%)</span>`
+  } else {
+    processRssiThresholdResults.textContent = ''
+  }
   processHistogramWrap.hidden = false
 }
 
@@ -4061,6 +4118,44 @@ function clampRssiLeeSpeedMps(v: number): number {
   return Math.max(0.05, Math.min(5, Number.isFinite(v) ? v : 1.4))
 }
 
+function clampRssiThresholdDb(v: number, fallback: number): number {
+  const n = Number.isFinite(v) ? v : fallback
+  return Math.max(-200, Math.min(50, n))
+}
+
+function clampRssiThresholdPct(v: number, fallback: number): number {
+  const n = Number.isFinite(v) ? v : fallback
+  return Math.max(0, Math.min(100, n))
+}
+
+function syncRssiHistogramThresholdInputs(): void {
+  processRssiThresholdMinDbInput.value = String(processRssiThresholdMinDb)
+  processRssiThresholdMinPctInput.value = String(processRssiThresholdMinPct)
+  processRssiThresholdMaxDbInput.value = String(processRssiThresholdMaxDb)
+  processRssiThresholdMaxPctInput.value = String(processRssiThresholdMaxPct)
+}
+
+function commitRssiHistogramThresholdInputs(): void {
+  processRssiThresholdMinDb = clampRssiThresholdDb(
+    Number(processRssiThresholdMinDbInput.value),
+    processRssiThresholdMinDb,
+  )
+  processRssiThresholdMinPct = clampRssiThresholdPct(
+    Number(processRssiThresholdMinPctInput.value),
+    processRssiThresholdMinPct,
+  )
+  processRssiThresholdMaxDb = clampRssiThresholdDb(
+    Number(processRssiThresholdMaxDbInput.value),
+    processRssiThresholdMaxDb,
+  )
+  processRssiThresholdMaxPct = clampRssiThresholdPct(
+    Number(processRssiThresholdMaxPctInput.value),
+    processRssiThresholdMaxPct,
+  )
+  syncRssiHistogramThresholdInputs()
+  updateProcessHistogramTable()
+}
+
 function applyRssiRollingAverage(rows: PathLossRow[], windowSize: number): PathLossRow[] {
   if (rows.length <= 1 || windowSize <= 1) return rows.map((r) => ({ ...r }))
   const w = clampRssiRollingWindow(windowSize)
@@ -4828,6 +4923,14 @@ rssiGraphLeeSpeedInput.addEventListener('change', () => {
 rssiGraphSaveFilteredBtn.addEventListener('click', () => {
   downloadFilteredRssiCsv()
 })
+processRssiThresholdMinDbInput.addEventListener('input', () => commitRssiHistogramThresholdInputs())
+processRssiThresholdMinDbInput.addEventListener('change', () => commitRssiHistogramThresholdInputs())
+processRssiThresholdMinPctInput.addEventListener('input', () => commitRssiHistogramThresholdInputs())
+processRssiThresholdMinPctInput.addEventListener('change', () => commitRssiHistogramThresholdInputs())
+processRssiThresholdMaxDbInput.addEventListener('input', () => commitRssiHistogramThresholdInputs())
+processRssiThresholdMaxDbInput.addEventListener('change', () => commitRssiHistogramThresholdInputs())
+processRssiThresholdMaxPctInput.addEventListener('input', () => commitRssiHistogramThresholdInputs())
+processRssiThresholdMaxPctInput.addEventListener('change', () => commitRssiHistogramThresholdInputs())
 
 processBtnSaveBundle.addEventListener('click', () => {
   if (processBtnSaveBundle.disabled) return
@@ -4997,6 +5100,7 @@ syncProcessRssiOffsetInput()
 loadProcessHeatmapFromStorage()
 syncProcessHeatmapControls()
 syncRssiGraphFilterControls()
+syncRssiHistogramThresholdInputs()
 processShiftXInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftYInput.addEventListener('change', () => commitProcessOverlayShiftFromInputs())
 processShiftReset.addEventListener('click', () => {

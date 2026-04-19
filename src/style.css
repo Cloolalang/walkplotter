@@ -1096,6 +1096,58 @@ label.process-file-pick {
   color: var(--text);
 }
 
+.process-histogram-meta {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.process-rssi-thresholds {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.process-rssi-thresholds-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.process-rssi-thresholds-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px 10px;
+}
+
+.process-rssi-threshold-field {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.process-rssi-threshold-field input {
+  width: 5.25rem;
+}
+
+.process-rssi-threshold-results {
+  margin: 8px 0 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.process-rssi-threshold-pass {
+  color: #8de5a9;
+}
+
+.process-rssi-threshold-fail {
+  color: #ff8f8f;
+}
+
 .process-colour-scale {
   margin: 0 0 12px;
   padding-bottom: 10px;
