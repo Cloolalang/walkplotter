@@ -1888,6 +1888,9 @@ function currentRssiColorStops(): readonly { db: number; rgb: readonly [number, 
 }
 
 function rssiToColor(rssi: number): string {
+  if (processRssiPalette === 'legacy') {
+    return rssiToColorInterpolated(rssi)
+  }
   const stops = currentRssiColorStops()
   const minDb = stops[0]!.db
   const maxDb = stops[stops.length - 1]!.db
@@ -1937,6 +1940,13 @@ function rssiScaleGradientCss(): string {
   const minDb = stops[0]!.db
   const maxDb = stops[stops.length - 1]!.db
   const den = Math.max(1e-9, maxDb - minDb)
+  if (processRssiPalette === 'legacy') {
+    const pts = stops.map((s) => ({
+      pct: ((s.db - minDb) / den) * 100,
+      color: rssiToColorInterpolated(s.db),
+    })).sort((a, b) => a.pct - b.pct)
+    return `linear-gradient(90deg, ${pts.map((p) => `${p.color} ${p.pct.toFixed(2)}%`).join(', ')})`
+  }
   const segs: string[] = []
   for (let i = 0; i < stops.length - 1; i++) {
     const lo = stops[i]!
