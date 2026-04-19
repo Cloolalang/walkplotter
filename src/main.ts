@@ -1810,10 +1810,6 @@ function pathLossScaleGradientCss(): string {
   return `linear-gradient(90deg, ${pts.map((p) => `${p.color} ${p.pct.toFixed(2)}%`).join(', ')})`
 }
 
-/** RSSI (dBm): −120 weak (black) → −25 strong (white); blues, green, yellow, orange, red ~−95. */
-const PROCESS_RSSI_GOOD = -25
-const PROCESS_RSSI_BAD = -120
-
 /** One stop every 10 dBm from weak (−120) to strong (−25); map and histogram use the same scale. */
 const RSSI_PALETTES: Record<RssiPaletteName, readonly { db: number; rgb: readonly [number, number, number] }[]> = {
   legacy: [
@@ -1871,15 +1867,15 @@ const RSSI_PALETTES: Record<RssiPaletteName, readonly { db: number; rgb: readonl
   jots: [
     { db: -120, rgb: [48, 48, 48] },
     { db: -110, rgb: [255, 0, 0] },
-    { db: -100, rgb: [255, 153, 0] },
-    { db: -90, rgb: [255, 255, 0] },
-    { db: -80, rgb: [0, 153, 0] },
-    { db: -70, rgb: [0, 255, 0] },
-    { db: -60, rgb: [0, 75, 224] },
-    { db: -50, rgb: [0, 255, 255] },
-    { db: -40, rgb: [176, 255, 255] },
-    { db: -30, rgb: [255, 255, 255] },
-    { db: -25, rgb: [255, 255, 255] },
+    { db: -100, rgb: [255, 0, 255] },
+    { db: -90, rgb: [255, 153, 0] },
+    { db: -80, rgb: [255, 255, 0] },
+    { db: -70, rgb: [0, 153, 0] },
+    { db: -60, rgb: [0, 255, 0] },
+    { db: -50, rgb: [0, 75, 224] },
+    { db: -40, rgb: [0, 255, 255] },
+    { db: -30, rgb: [176, 255, 255] },
+    { db: -20, rgb: [255, 255, 255] },
   ],
 }
 
@@ -1892,8 +1888,10 @@ function currentRssiColorStops(): readonly { db: number; rgb: readonly [number, 
 }
 
 function rssiToColor(rssi: number): string {
-  const x = Math.max(PROCESS_RSSI_BAD, Math.min(PROCESS_RSSI_GOOD, rssi))
   const stops = currentRssiColorStops()
+  const minDb = stops[0]!.db
+  const maxDb = stops[stops.length - 1]!.db
+  const x = Math.max(minDb, Math.min(maxDb, rssi))
   if (x <= stops[0]!.db) {
     const c = stops[0]!.rgb
     return rgbStringFromPalette(c[0], c[1], c[2])
@@ -1919,8 +1917,12 @@ function rssiToColor(rssi: number): string {
 }
 
 function rssiScaleGradientCss(): string {
-  const pts = currentRssiColorStops().map((s) => ({
-    pct: ((s.db - PROCESS_RSSI_GOOD) / (PROCESS_RSSI_BAD - PROCESS_RSSI_GOOD)) * 100,
+  const stops = currentRssiColorStops()
+  const minDb = stops[0]!.db
+  const maxDb = stops[stops.length - 1]!.db
+  const den = Math.max(1e-9, maxDb - minDb)
+  const pts = stops.map((s) => ({
+    pct: ((s.db - minDb) / den) * 100,
     color: rssiToColor(s.db),
   })).sort((a, b) => a.pct - b.pct)
   return `linear-gradient(90deg, ${pts.map((p) => `${p.color} ${p.pct.toFixed(2)}%`).join(', ')})`
